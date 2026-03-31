@@ -1,24 +1,47 @@
 /**
- * services/socketService.js — Singleton socket.io-client connection.
+ * services/socketService.js — Singleton socket.io-client + gestión de sessionId.
  *
- * WHY A SINGLETON?
- *   Ensures only one WebSocket connection exists regardless of how many
- *   components import this module. Prevents duplicate event listeners.
+ * MANEJO DE SESIÓN ANÓNIMA:
+ *   No hay autenticación. Cada pestaña del navegador genera un sessionId único
+ *   (crypto.randomUUID, API nativa del navegador) que se guarda en sessionStorage.
+ *   sessionStorage tiene alcance de pestaña: se limpia al cerrar la pestaña,
+ *   lo que garantiza sesiones separadas por contexto de conversación.
  *
- * FUTURE TIP (auth):
- *   When adding JWT, pass the token in the auth option:
- *     socket = io(SOCKET_URL, { auth: { token: getToken() } })
- *   The server reads it via: socket.handshake.auth.token
+ *   El sessionId se envía en el payload de cada 'send_message' para que el
+ *   backend pueda recuperar el contexto conversacional de Redis.
+ *   El frontend NO almacena contexto del negocio — esa lógica vive en el backend.
+ *
+ * POR QUÉ sessionStorage Y NO localStorage:
+ *   localStorage persiste entre pestañas y sesiones del navegador.
+ *   sessionStorage garantiza sesiones independientes por pestaña,
+ *   alineado con el TTL de 3.5 min en Redis.
  */
 
 import { io } from 'socket.io-client';
 
-// Connect to the same origin that served the page.
-// Vite's proxy (/socket.io → localhost:3000) handles both localhost
-// and LAN-IP access (e.g. from a phone), so no hardcoded URL is needed.
 let socket = null;
 
 const socketService = {
+  /**
+   * Obtiene o genera el sessionId para la pestaña actual.
+   * Se crea una sola vez con crypto.randomUUID() y se guarda en sessionStorage.
+   * @returns {string} UUID v4
+   */
+  getSessionId() {
+    let sessionId = sessionStorage.getItem('chat_session_id');
+    if (!sessionId) {
+      // crypto.randomUUID() es nativa en navegadores modernos (Chrome 92+, Firefox 95+, Safari 15.4+)
+      sessionId = crypto.randomUUID();
+      sessionStorage.setItem('chat_session_id', sessionId);
+    }
+    return sessionId;
+  },
+
+  /**
+   * Establece (o reutiliza) la conexión WebSocket.
+   * La conexión es compartida por toda la pestaña — un solo socket por pestaña.
+   * @returns {import('socket.io-client').Socket}
+   */
   connect() {
     if (!socket) {
       socket = io(window.location.origin, {
@@ -44,3 +67,4 @@ const socketService = {
 };
 
 export default socketService;
+

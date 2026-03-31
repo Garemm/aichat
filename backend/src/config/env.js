@@ -15,12 +15,16 @@ const env = {
     .map((u) => u.trim())
     .filter(Boolean),
 
-  // ── PostgreSQL (uncomment when configuring) ──────────────────────────────
+  // ── PostgreSQL ────────────────────────────────────────────────────────────
   DB_HOST: process.env.DB_HOST,
   DB_PORT: parseInt(process.env.DB_PORT, 10) || 5432,
   DB_NAME: process.env.DB_NAME,
   DB_USER: process.env.DB_USER,
   DB_PASSWORD: process.env.DB_PASSWORD,
+
+  // ── Redis (contexto conversacional / cache de sesiones) ──────────────────
+  REDIS_HOST: process.env.REDIS_HOST || 'localhost',
+  REDIS_PORT: parseInt(process.env.REDIS_PORT, 10) || 6379,
 
   // ── OpenAI (uncomment when integrating) ─────────────────────────────────
   // OPENAI_API_KEY: process.env.OPENAI_API_KEY,

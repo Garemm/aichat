@@ -1,6 +1,6 @@
 # LLM Chat AI — Documentación del Proyecto
 
-> Última actualización: 29 de marzo de 2026 — 23:00 h  
+> Última actualización: 30 de marzo de 2026 — Sprint 6  
 > Estado: desarrollo activo
 
 ---
@@ -36,6 +36,7 @@ LLM Chat AI business/
 │       ├── config/
 │       │   ├── database.js         Pool de conexión PostgreSQL (pg)
 │       │   ├── env.js              Fuente única de variables de entorno
+│       │   ├── redis.js            Cliente ioredis singleton (contexto de sesiones)
 │       │   └── schema.sql          Esquema completo + seed de la BD
 │       ├── middlewares/
 │       │   ├── errorHandler.js     Manejador centralizado de errores
@@ -50,11 +51,12 @@ LLM Chat AI business/
 │       │   ├── index.js
 │       │   └── messageRoutes.js
 │       ├── services/
-│       │   ├── businessInfoService.js   Despacha intenciones → BusinessModel
+│       │   ├── businessInfoService.js      Despacha intenciones → BusinessModel
 │       │   ├── intentResponseFormatter.js  Convierte filas DB → texto legible
-│       │   ├── intentService.js         Detecta intención por palabras clave
-│       │   ├── messageService.js        Lógica de guardado/lectura de mensajes
-│       │   └── nlpEntityExtractor.js    NLP: extrae entidades y consulta productos
+│       │   ├── intentService.js            Detecta intención por palabras clave
+│       │   ├── messageService.js           Lógica de guardado/lectura de mensajes
+│       │   ├── nlpEntityExtractor.js       NLP: extrae entidades y consulta productos
+│       │   └── sessionContextService.js    Contexto de sesión anónima en Redis
 │       ├── sockets/
 │       │   └── chatSocket.js       Eventos Socket.io + pipeline de respuesta
 │       └── temp/
@@ -107,13 +109,17 @@ CLIENT_URL=http://localhost:5173,http://192.168.1.3:5173
 
 DB_HOST=localhost
 DB_PORT=5432
-DB_NAME=llm_chat
+DB_NAME=aichat
 DB_USER=postgres
 DB_PASSWORD=<tu_password>
+
+# Redis — contexto conversacional temporal
+REDIS_HOST=localhost
+REDIS_PORT=6379
 ```
 
 > `CLIENT_URL` acepta múltiples orígenes separados por coma. `env.js` los parsea en un array que CORS y Socket.io consumen directamente.  
-> Esto permite conectarse tanto desde `localhost` como desde la IP de la red local (celular en la misma Wi-Fi).
+> `REDIS_HOST`/`REDIS_PORT` son opcionales: si Redis no está disponible, el sistema degrada elegantemente sin contexto conversacional (el chat sigue funcionando).
 
 ### `frontend/.env`
 
@@ -189,82 +195,90 @@ Usuario escribe "cuando abren?"
 
 ---
 
-### 4.2 Backend — pipeline de procesamiento
+### 4.2 Backend — pipeline de procesamiento con contexto
 
-Una vez que `chatSocket.js` recibe el evento `send_message`, ejecuta el siguiente pipeline en orden. **Cada etapa devuelve `null` si no puede responder**, lo que hace avanzar al siguiente nivel.
+El evento `send_message` ahora recibe `{ roomId, sender, text, sessionId }`.  
+El `sessionId` (UUID generado en el frontend) es la clave de Redis que mantiene el contexto de la conversación.
 
 ```
-Mensaje recibido: "cuando abren?"
+Mensaje recibido: { text: "¿y cuánto cuesta?", sessionId: "a3f2..." }
+        │
+        ▼ Validar sessionId (string requerido)
         │
         ▼ Guardar mensaje del usuario en memoria + emitir al room
         │
         ├─────────────────────────────────────────────────────────
-        │  ETAPA 1 — nlpEntityExtractor.extractAndRespond()
+        │  PASO 1 — getContext(sessionId)  [Redis]
         │
-        │  Objetivo: detectar si el mensaje pregunta por un
-        │  producto ESPECÍFICO con nombre ("tienen pizza?",
-        │  "cuanto cuesta la hamburguesa doble?")
+        │  Lee la clave "session:{sessionId}" en Redis.
+        │  Devuelve: { lastIntent, lastProduct, lastEntities, updatedAt }
+        │  Si la sesión no existe o expiró → todos los campos son null.
         │
-        │  Pasos internos:
-        │    1. normalize(text)  → minúsculas + quitar acentos
-        │    2. extractProductEntity(normalized):
-        │         a. Prueba 14 patrones regex en orden
-        │            ("tienen X?", "hay X?", "cuanto cuesta X", …)
-        │         b. Si ningún patrón aplica Y el mensaje tiene
-        │            trigger words (tienen/hay/busco/precio…),
-        │            usa Compromise NLP para extraer el noun phrase
-        │            más largo del texto
-        │         c. Aplica ENTITY_BLOCKLIST: descarta entidades
-        │            genéricas ("productos", "catalogo", "menu"…)
-        │            y cualquier frase que las contenga
-        │    3. Si entidad encontrada → queryProductByEntity():
-        │         SELECT … FROM products WHERE name ILIKE '%entidad%'
-        │         ORDER BY exact match first LIMIT 5
-        │    4. formatProductResponse() → string listo para enviar
-        │
-        │  Resultado para "cuando abren?":
-        │    → no hay trigger word productivo → devuelve null
+        │  Ejemplo: context = { lastIntent: null, lastProduct: "hamburguesa" }
         │
         ├─────────────────────────────────────────────────────────
-        │  ETAPA 2 — intentService.detectIntent()
+        │  PASO 2 — Detección dual en el mensaje actual
         │
-        │  Objetivo: identificar temas amplios sin nombre de producto
-        │  ("a que hora abren?", "que productos tienen?", "hay ofertas?")
+        │  A) extractProductEntity(normalize(text))
+        │     Extrae el nombre de producto del mensaje:
+        │       "¿y cuánto cuesta?" → null  (no hay producto nombrado)
+        │       "tienen pizza doble?" → "pizza doble"
         │
-        │  Pasos internos:
-        │    1. Normaliza el texto (lowercase + sin acentos)
-        │    2. Itera el árbol de intents en intents.js
-        │       { horarios, productos, precios, promociones, ubicacion }
-        │    3. Para cada intent, itera sus keywords y hace includes()
-        │    4. Devuelve el nombre del intent o null
-        │
-        │  Resultado para "cuando abren?":
-        │    → coincide con keyword "cuando abren" → devuelve "horarios"
-        │
-        │  Con el intent detectado:
-        │    businessInfoService.getBusinessInfoByIntent("horarios", 1)
-        │      → QUERY_MAP["horarios"](1)
-        │      → BusinessModel.getHorarios(1)
-        │      → SELECT day_of_week, open_time, close_time, is_closed
-        │          FROM business_hours WHERE business_id = 1
-        │
-        │    intentResponseFormatter.formatIntentResponse("horarios", rows)
-        │      → "🕐 *Horarios de atención:*\n  • Lunes: 8:00 am…"
+        │  B) detectIntent(text)
+        │     Detecta el tema por palabras clave:
+        │       "¿y cuánto cuesta?" → "precios"  (keyword "cuánto cuesta")
+        │       "cuando abren?"     → "horarios"
         │
         ├─────────────────────────────────────────────────────────
-        │  ETAPA 3 — keywordResponses / mockOpenAI  (fallback)
+        │  PASO 3 — Resolución efectiva con fallback de contexto
         │
-        │  Solo llega aquí si las etapas 1 y 2 devolvieron null.
+        │  effectiveProduct = detectedProduct
+        │      || (detectedIntent ? context.lastProduct : null)
         │
-        │    getKeywordResponse(text)
-        │      → busca en keywordResponses.js (ej. "hola" → "hola para ti también")
+        │  Para "¿y cuánto cuesta?":
+        │    detectedProduct = null
+        │    detectedIntent  = "precios"
+        │    context.lastProduct = "hamburguesa"
+        │    → effectiveProduct = "hamburguesa"  ← heredado del contexto
+        │    → effectiveIntent  = "precios"
         │
-        │    getMockOpenAIResponse(text)  [si keywordResponse devuelve null]
-        │      → placeholder: '🤖 OpenAI dice: "…"'
-        │      → será reemplazado por la llamada real a OpenAI API en el futuro
+        ├─────────────────────────────────────────────────────────
+        │  PASO 4 — Decisión reglas vs IA
+        │
+        │  ¿effectiveProduct O effectiveIntent?
+        │    SÍ → handleWithRules({ intent, product, businessId })
+        │    NO → handleWithAI(text, context)  (fallback)
+        │
+        │  handleWithRules:
+        │    1. Si hay producto → queryProductByEntity(product, businessId)
+        │         SELECT … FROM products WHERE name ILIKE '%hamburguesa%'
+        │         → formatProductResponse("hamburguesa", rows)
+        │    2. Si solo intent → getBusinessInfoByIntent(intent, businessId)
+        │         → formatIntentResponse(intent, data)
+        │
+        │  handleWithAI:
+        │    1. getKeywordResponse(text)  → saludos / frases simples
+        │    2. getMockOpenAIResponse(text, context)  → respuesta contextual
+        │       (en producción: llamada real a OpenAI con historial)
+        │
+        ├─────────────────────────────────────────────────────────
+        │  PASO 5 — updateContext(sessionId, { lastIntent, lastProduct })
+        │
+        │  Guarda en Redis lo detectado en este turno.
+        │  TTL: 210 segundos (3.5 min), renovado con cada mensaje.
+        │  Si Redis no está disponible, el chat sigue sin guardar contexto.
         │
         └─────────────────────────────────────────────────────────
 ```
+
+#### Tabla de ejemplos con contexto
+
+| Turno | Mensaje | detectedProduct | detectedIntent | effectiveProduct | Respuesta |
+|-------|---------|-----------------|----------------|------------------|-----------|
+| 1 | "tienen hamburguesa doble?" | `hamburguesa doble` | null | `hamburguesa doble` | Tarjeta del producto |
+| 2 | "¿y cuánto cuesta?" | null | `precios` | `hamburguesa doble` (contexto) | Precio de hamburguesa doble |
+| 3 | "cuando abren?" | null | `horarios` | null | Tabla de horarios completa |
+| 4 | "hola" | null | null | null | Respuesta keywordResponses / AI |
 
 ### 4.3 Backend → Frontend (respuesta)
 
@@ -331,14 +345,24 @@ Queries SQL parametrizadas por intent y `business_id`. Cada método retorna rows
 ### `backend/src/services/intentResponseFormatter.js`
 Formateadores de respuesta. Convierte arrays de filas de la BD en strings con emojis y formato markdown legible. Un formateador por intent en el objeto `FORMATTERS`.
 
+### `backend/src/config/redis.js`
+Cliente `ioredis` singleton con `lazyConnect: true`. Exporta la instancia única que usan `sessionContextService` y cualquier servicio futuro que necesite Redis. Si Redis no arranca, `retryStrategy` deja de reintentar tras 3 intentos y el chat continúa sin contexto.
+
+### `backend/src/services/sessionContextService.js`
+Capa de acceso al contexto de sesión en Redis. Expone dos funciones:
+- `getContext(sessionId)` → lee `session:{sessionId}`, devuelve `{ lastIntent, lastProduct, lastEntities, updatedAt }` (o todo null si la sesión no existe)
+- `updateContext(sessionId, data)` → hace MERGE con el contexto previo y escribe con `SETEX` (TTL 210 s renovado)
+
+Ambas funciones capturan internamente los errores de Redis para no cortar el flujo del chat.
+
 ### `backend/src/sockets/chatSocket.js`
-Orquestador principal. Registra los eventos Socket.io y ejecuta el pipeline Stage 1 → Stage 2 → Stage 3 en el handler `send_message`. La constante `ACTIVE_BUSINESS_ID = 1` determina qué negocio se consulta.
+Orquestador principal con pipeline de contexto conversacional. El handler `send_message` ahora recibe `sessionId`, recupera contexto de Redis, resuelve `effectiveProduct`/`effectiveIntent` con fallback al contexto previo, delega a `handleWithRules` o `handleWithAI`, y actualiza el contexto tras cada turno.
 
 ### `frontend/src/services/socketService.js`
-Singleton de socket.io-client. Conecta a `window.location.origin` para que el proxy de Vite funcione tanto en localhost como desde la IP de red local (celular).
+Singleton de socket.io-client. Agrega `getSessionId()`: genera un UUID v4 con `crypto.randomUUID()` la primera vez y lo persiste en `sessionStorage`. No almacena contexto del negocio — sólo el identificador de sesión.
 
 ### `frontend/src/hooks/useSocket.js`
-Hook React que maneja el lifecycle del socket. Emite `join_room` al montar, registra listeners para `receive_message` / `user_typing`, y expone `sendMessage`, `emitTyping`, `emitStopTyping`.
+Hook React que maneja el lifecycle del socket. `sendMessage()` ahora incluye `sessionId` en el payload: `{ roomId, sender, text, sessionId }`. El sessionId se lee desde `socketService.getSessionId()` en cada envío.
 
 ### `frontend/vite.config.js`
 Proxy de desarrollo: `/socket.io` → `http://localhost:3000` (websocket) y `/api` → `http://localhost:3000`. Esto evita CORS cross-port durante desarrollo.
@@ -391,6 +415,40 @@ Proxy de desarrollo: `/socket.io` → `http://localhost:3000` (websocket) y `/ap
   | "cuando abren?"            | Intent (Stage 2)   | Tabla de horarios de lunes a domingo |
   | "que productos tienen?"    | Intent (Stage 2)   | Lista de todos los productos disponibles |
   | "hola"                     | Fallback (Stage 3) | Respuesta de keywordResponses.js |
+
+### Sprint 6 — Contexto conversacional con Redis  *(30 mar 2026)*
+
+#### Instalaciones
+- **`ioredis`** instalado como dependencia de producción en el backend
+
+#### Archivos creados
+
+| Archivo | Propósito |
+|---|---|
+| `backend/src/config/redis.js` | Cliente ioredis singleton con lazyConnect y retryStrategy |
+| `backend/src/services/sessionContextService.js` | `getContext` / `updateContext` con TTL 210 s en Redis |
+
+#### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `backend/src/config/env.js` | Agrega `REDIS_HOST`, `REDIS_PORT` |
+| `backend/src/services/nlpEntityExtractor.js` | Exporta `queryProductByEntity` y `formatProductResponse` para reuso en chatSocket |
+| `backend/src/temp/mockOpenAI.js` | Recibe `context` y genera respuestas coherentes con `lastProduct` / `lastIntent` |
+| `backend/src/sockets/chatSocket.js` | Pipeline reescrito con contexto: `getContext` → detección dual → resolución efectiva → `handleWithRules`/`handleWithAI` → `updateContext` |
+| `frontend/src/services/socketService.js` | Agrega `getSessionId()` con `crypto.randomUUID()` + `sessionStorage` |
+| `frontend/src/hooks/useSocket.js` | `sendMessage` incluye `sessionId` en el payload |
+| `backend/.env` *(si existe)* | Agregar `REDIS_HOST=localhost` y `REDIS_PORT=6379` |
+
+#### Comportamiento nuevo
+
+- Las sesiones son anónimas — no hay login ni JWT
+- Cada pestaña del navegador tiene su propio `sessionId` en `sessionStorage`
+- El contexto expira a los 3.5 minutos de inactividad (TTL Redis)
+- Si Redis no está disponible, el chat responde sin contexto (degradación elegante)
+- Preguntas de seguimiento como "¿y cuánto cuesta?" usan el producto del turno anterior
+
+---
 
 ### Sprint 5 — Testing profesional y CI/CD  *(29 mar 2026)*
 
@@ -526,7 +584,12 @@ Abrir `backend/src/services/nlpEntityExtractor.js`:
 1. Agregar `OPENAI_API_KEY` en `backend/.env`
 2. Descomentar la variable en `env.js`
 3. Crear `backend/src/services/openaiService.js` con la llamada a la API
-4. En `chatSocket.js`, reemplazar `getMockOpenAIResponse(text)` en Stage 3 por `await openaiService.chat(text)`
+4. En `chatSocket.js`, reemplazar `getMockOpenAIResponse(text, context)` en `handleWithAI` por `await openaiService.chat(text, context)` (pasar el contexto para incluirlo como system prompt)
+
+### Cambiar el TTL del contexto de sesión
+
+Modificar `SESSION_TTL_SECONDS` en `backend/src/services/sessionContextService.js`.  
+Valor actual: `210` (3.5 min). Rango recomendado: 180–300 s (3–5 min).
 
 ### Soporte multi-negocio
 
@@ -542,11 +605,15 @@ Actualmente `ACTIVE_BUSINESS_ID = 1` está hardcodeado en `chatSocket.js`. Para 
 
 - Node.js ≥ 18
 - PostgreSQL corriendo localmente
+- **Redis corriendo localmente** (puerto 6379 por defecto)
 - Base de datos creada y schema aplicado:
 
 ```bash
-psql -U postgres -d llm_chat -f backend/src/config/schema.sql
+psql -U postgres -d aichat -f backend/src/config/schema.sql
 ```
+
+> **Redis en Windows:** instalar con WSL2 (`sudo apt install redis-server`) o usar Docker (`docker run -d -p 6379:6379 redis:alpine`).  
+> Si Redis no está disponible el chat arranca igual pero sin contexto conversacional (no hay preguntas de seguimiento contextualizadas).
 
 ### Backend
 

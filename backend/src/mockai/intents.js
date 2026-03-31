@@ -33,6 +33,8 @@ const intents = {
       'están abiertos ahora',
       'abren mañana',
       'abren hoy',
+      'abres el',
+      'abren el',
       'cuales son sus horarios',
       'cuáles son sus horarios',
       'me pueden decir el horario',

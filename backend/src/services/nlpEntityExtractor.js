@@ -91,6 +91,12 @@ const ENTITY_BLOCKLIST = new Set([
   'catalogo', 'catálogo', 'lista', 'menu', 'menú',
   'servicio', 'servicios', 'oferta', 'ofertas',
   'algo', 'todo', 'nada', 'mucho', 'poco',
+  // Palabras interrogativas — nunca son nombres de producto.
+  // Previenen que el fallback NLP extraiga frases como "cuanto cuesta" cuando
+  // no hay un producto específico (ej: "¿y cuánto cuesta?" sin contexto).
+  // Los patrones regex SÍ manejan "cuánto cuesta la hamburguesa" correctamente
+  // porque captoran el nombre del producto DESPUÉS de la palabra interrogativa.
+  'cuanto', 'cuanta', 'cuantos', 'cuantas',
 ]);
 
 /**
@@ -340,7 +346,9 @@ async function extractAndRespond(message, businessId = DEFAULT_BUSINESS_ID) {
 
 module.exports = {
   extractAndRespond,
-  // Exported for testing or reuse in other services
+  // Exported for reuse: context-aware pipeline in chatSocket.js
   normalize,
   extractProductEntity,
+  queryProductByEntity,
+  formatProductResponse,
 };

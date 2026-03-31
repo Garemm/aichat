@@ -22,3 +22,6 @@ process.env.DB_PASSWORD = process.env.DB_PASSWORD || 'test';
 process.env.NODE_ENV    = 'test';
 process.env.PORT        = '3001';
 process.env.CLIENT_URL  = 'http://localhost:5173';
+// Redis — usado por sessionContextService (mockeado en tests unitarios)
+process.env.REDIS_HOST  = process.env.REDIS_HOST  || 'localhost';
+process.env.REDIS_PORT  = process.env.REDIS_PORT  || '6379';

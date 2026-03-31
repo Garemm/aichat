@@ -4,13 +4,17 @@
  * Manages the socket lifecycle for a component tree.
  * Registers event listeners on mount, cleans them up on unmount.
  *
- * Exposes:
- *   sendMessage   — emits 'send_message' to the server
- *   emitTyping    — emits 'typing' indicator
- *   emitStopTyping — emits 'stop_typing'
+ * MANEJO DE SESIÓN:
+ *   Cada emit de 'send_message' incluye el sessionId de la pestaña actual.
+ *   socketService.getSessionId() lo lee desde sessionStorage (o lo genera
+ *   si es la primera vez), garantizando una sesión por pestaña del navegador.
+ *   El frontend NO almacena ni interpreta el contexto — esa responsabilidad
+ *   pertenece exclusivamente al backend (Redis).
  *
- * TIP: This hook is the single place that knows about socket event names.
- *      If you rename an event, you change it here once — nowhere else.
+ * Exposes:
+ *   sendMessage    — emits 'send_message' con { roomId, sender, text, sessionId }
+ *   emitTyping     — emits indicador 'typing'
+ *   emitStopTyping — emits 'stop_typing'
  */
 
 import { useEffect, useRef } from 'react';
@@ -32,7 +36,6 @@ const useSocket = () => {
   useEffect(() => {
     const socket = socketService.connect();
 
-    // Join room only when roomId changes
     if (joinedRoom.current !== roomId) {
       socket.emit('join_room', roomId);
       joinedRoom.current = roomId;
@@ -53,8 +56,14 @@ const useSocket = () => {
     };
   }, [roomId, username, addMessage, setHistory, addTypingUser, removeTypingUser]);
 
+  /**
+   * Envía el mensaje del usuario incluyendo el sessionId de la sesión actual.
+   * El backend usa el sessionId para recuperar el contexto de Redis y
+   * determinar si el mensaje es una pregunta de seguimiento.
+   */
   const sendMessage = (text) => {
-    socketService.getSocket().emit('send_message', { roomId, sender: username, text });
+    const sessionId = socketService.getSessionId();
+    socketService.getSocket().emit('send_message', { roomId, sender: username, text, sessionId });
   };
 
   const emitTyping = () => {
@@ -69,3 +78,4 @@ const useSocket = () => {
 };
 
 export default useSocket;
+
