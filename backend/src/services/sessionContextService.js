@@ -12,7 +12,7 @@
  *
  * ESTRUCTURA EN REDIS:
  *   Key:   session:{sessionId}
- *   Value: JSON → { lastIntent, lastProduct, lastEntities, updatedAt }
+ *   Value: JSON → { lastIntent, lastEntity: { type, value }, updatedAt }
  *   TTL:   SESSION_TTL_SECONDS (210 s = 3.5 min), renovado con cada actualización
  *
  * POR QUÉ REDIS Y NO BASE DE DATOS:
@@ -21,10 +21,10 @@
  *   • El historial NO se persiste — el contexto es efímero por diseño
  *   • Si Redis no está disponible, el chat degrada elegantemente sin contexto
  *
- * USO TÍPICO EN chatSocket.js:
+ * USO TÍPICO EN messagePipeline.js:
  *   const ctx = await getContext(sessionId);
- *   // ... lógica con ctx.lastProduct o ctx.lastIntent ...
- *   await updateContext(sessionId, { lastIntent: 'precios', lastProduct: 'hamburguesa' });
+ *   // ... lógica con ctx.lastEntity o ctx.lastIntent ...
+ *   await updateContext(sessionId, { lastIntent: 'precios', lastEntity: { type: 'product', value: 'laptop' } });
  */
 
 const redis = require('../config/redis');
@@ -41,6 +41,13 @@ function sessionKey(sessionId) {
   return `session:${sessionId}`;
 }
 
+/** Empty context returned for new sessions or when Redis is unavailable. */
+const EMPTY_CONTEXT = {
+  lastIntent: null,
+  lastEntity: { type: null, value: null },
+  updatedAt: null,
+};
+
 /**
  * Recupera el contexto de una sesión desde Redis.
  *
@@ -49,23 +56,34 @@ function sessionKey(sessionId) {
  *
  * @param {string} sessionId  UUID generado en el frontend (sessionStorage)
  * @returns {Promise<{
- *   lastIntent:   string|null,
- *   lastProduct:  string|null,
- *   lastEntities: Record<string, any>,
- *   updatedAt:    string|null
+ *   lastIntent:  string|null,
+ *   lastEntity:  { type: string|null, value: string|null },
+ *   updatedAt:   string|null
  * }>}
  */
 async function getContext(sessionId) {
   try {
     const raw = await redis.get(sessionKey(sessionId));
     if (!raw) {
-      return { lastIntent: null, lastProduct: null, lastEntities: {}, updatedAt: null };
+      return { ...EMPTY_CONTEXT };
     }
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    // Migrate old format: { lastProduct, lastEntities } → { lastEntity: { type, value } }
+    if (parsed.lastProduct !== undefined && parsed.lastEntity === undefined) {
+      parsed.lastEntity = parsed.lastProduct
+        ? { type: 'product', value: parsed.lastProduct }
+        : { type: null, value: null };
+      delete parsed.lastProduct;
+      delete parsed.lastEntities;
+    }
+    // Ensure lastEntity always has the right shape
+    if (!parsed.lastEntity || typeof parsed.lastEntity !== 'object') {
+      parsed.lastEntity = { type: null, value: null };
+    }
+    return parsed;
   } catch (err) {
-    // Redis no disponible: chat continúa sin contexto — no rompe el flujo
     console.warn('[Context] Error al leer contexto Redis:', err.message);
-    return { lastIntent: null, lastProduct: null, lastEntities: {}, updatedAt: null };
+    return { ...EMPTY_CONTEXT };
   }
 }
 
@@ -73,15 +91,13 @@ async function getContext(sessionId) {
  * Guarda o actualiza el contexto de la sesión en Redis.
  *
  * Hace MERGE sobre el contexto previo para no perder campos que no se
- * modifican en el turno actual (ej: si solo se actualiza lastIntent,
- * lastProduct del turno anterior se conserva).
+ * modifican en el turno actual.
  * SETEX renueva el TTL con cada interacción activa.
  *
  * @param {string} sessionId
  * @param {{
- *   lastIntent?:   string|null,
- *   lastProduct?:  string|null,
- *   lastEntities?: Record<string, any>
+ *   lastIntent?:  string|null,
+ *   lastEntity?:  { type: string|null, value: string|null }
  * }} data  Campos a actualizar (parcial)
  * @returns {Promise<void>}
  */
@@ -93,12 +109,10 @@ async function updateContext(sessionId, data) {
       ...data,
       updatedAt: new Date().toISOString(),
     };
-    // SETEX garantiza TTL siempre renovado con cada mensaje activo
     await redis.setex(sessionKey(sessionId), SESSION_TTL_SECONDS, JSON.stringify(updated));
   } catch (err) {
-    // No propagamos el error — el chat sigue sin contexto persistido
     console.warn('[Context] Error al guardar contexto Redis:', err.message);
   }
 }
 
-module.exports = { getContext, updateContext };
+module.exports = { getContext, updateContext, EMPTY_CONTEXT };

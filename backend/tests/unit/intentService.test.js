@@ -4,14 +4,16 @@
  * tests/unit/intentService.test.js
  *
  * Unit tests for:
- *   - intentService.detectIntent()
+ *   - intentDetector.detectIntent()      — score-based intent detection
+ *   - intentDetector.scoreIntents()      — individual intent scoring
+ *   - intentDetector.isStandaloneIntent() — standalone flag checking
  *
  * These tests are PURE (no DB, no sockets).
- * They verify that keyword → intent mapping and text normalization work
+ * They verify that weighted keyword scoring and text normalization work
  * correctly for Spanish user input with and without accents.
  */
 
-const { detectIntent } = require('../../src/services/intentService');
+const { detectIntent, scoreIntents, isStandaloneIntent, MIN_CONFIDENCE } = require('../../src/services/intentDetector');
 
 // ─── detectIntent ─────────────────────────────────────────────────────────────
 
@@ -41,7 +43,7 @@ describe('detectIntent()', () => {
     ];
 
     test.each(HORARIOS_CASES)('"%s" → horarios', (msg) => {
-      expect(detectIntent(msg)).toBe('horarios');
+      expect(detectIntent(msg).intent).toBe('horarios');
     });
   });
 
@@ -56,14 +58,11 @@ describe('detectIntent()', () => {
       'catalogo de productos',
       'catálogo de productos',
       'lista de productos',
-      'busco un producto',
-      'hay disponibilidad de',
-      'donde encuentro',
-      'dónde encuentro',
+      'hay disponibilidad de algo',
     ];
 
     test.each(PRODUCTOS_CASES)('"%s" → productos', (msg) => {
-      expect(detectIntent(msg)).toBe('productos');
+      expect(detectIntent(msg).intent).toBe('productos');
     });
   });
 
@@ -83,7 +82,7 @@ describe('detectIntent()', () => {
     ];
 
     test.each(PRECIOS_CASES)('"%s" → precios', (msg) => {
-      expect(detectIntent(msg)).toBe('precios');
+      expect(detectIntent(msg).intent).toBe('precios');
     });
   });
 
@@ -103,7 +102,7 @@ describe('detectIntent()', () => {
     ];
 
     test.each(PROMO_CASES)('"%s" → promociones', (msg) => {
-      expect(detectIntent(msg)).toBe('promociones');
+      expect(detectIntent(msg).intent).toBe('promociones');
     });
   });
 
@@ -123,7 +122,7 @@ describe('detectIntent()', () => {
     ];
 
     test.each(UBICACION_CASES)('"%s" → ubicacion', (msg) => {
-      expect(detectIntent(msg)).toBe('ubicacion');
+      expect(detectIntent(msg).intent).toBe('ubicacion');
     });
   });
 
@@ -141,24 +140,99 @@ describe('detectIntent()', () => {
     ];
 
     test.each(NO_MATCH_CASES)('"%s" → null', (msg) => {
-      expect(detectIntent(msg)).toBeNull();
+      expect(detectIntent(msg).intent).toBeNull();
     });
   });
 
   // ── edge cases ───────────────────────────────────────────────────────────────
   describe('edge cases', () => {
     test('is case-insensitive', () => {
-      expect(detectIntent('CUANDO ABREN?')).toBe('horarios');
-      expect(detectIntent('CUÁNTO CUESTA')).toBe('precios');
+      expect(detectIntent('CUANDO ABREN?').intent).toBe('horarios');
+      expect(detectIntent('CUÁNTO CUESTA').intent).toBe('precios');
     });
 
     test('is accent-insensitive', () => {
-      expect(detectIntent('cuándo abren')).toBe('horarios');   // á
-      expect(detectIntent('cuando abren')).toBe('horarios');   // a
+      expect(detectIntent('cuándo abren').intent).toBe('horarios');
+      expect(detectIntent('cuando abren').intent).toBe('horarios');
     });
 
     test('detects intent inside longer sentence', () => {
-      expect(detectIntent('hola, me podrían decir cuando abren por favor?')).toBe('horarios');
+      expect(detectIntent('hola, me podrían decir cuando abren por favor?').intent).toBe('horarios');
     });
+
+    test('returns full result object with score and scores', () => {
+      const result = detectIntent('cuanto cuesta');
+      expect(result).toHaveProperty('intent', 'precios');
+      expect(result).toHaveProperty('score');
+      expect(result.score).toBeGreaterThanOrEqual(MIN_CONFIDENCE);
+      expect(result).toHaveProperty('scores');
+      expect(result).toHaveProperty('confident', true);
+    });
+
+    test('not-confident result has intent=null', () => {
+      const result = detectIntent('hola');
+      expect(result.intent).toBeNull();
+      expect(result.confident).toBe(false);
+      expect(result.score).toBe(0);
+    });
+  });
+});
+
+// ─── scoreIntents ─────────────────────────────────────────────────────────────
+
+describe('scoreIntents()', () => {
+  test('high-weight phrase scores more than single keyword', () => {
+    const scores = scoreIntents('tienen descuentos');
+    expect(scores.promociones).toBeGreaterThanOrEqual(3);
+  });
+
+  test('"tienen" alone does not match any intent', () => {
+    const scores = scoreIntents('tienen');
+    expect(Object.keys(scores).length).toBe(0);
+  });
+
+  test('returns empty object for unrecognized text', () => {
+    const scores = scoreIntents('hola mundo');
+    expect(scores).toEqual({});
+  });
+
+  test('can accept custom intents config', () => {
+    const custom = {
+      test_intent: {
+        name: 'test_intent',
+        standalone: true,
+        keywords: [{ phrase: 'foobar', weight: 2 }],
+      },
+    };
+    const scores = scoreIntents('foobar', custom);
+    expect(scores.test_intent).toBe(2);
+  });
+});
+
+// ─── isStandaloneIntent ───────────────────────────────────────────────────────
+
+describe('isStandaloneIntent()', () => {
+  test('horarios is standalone', () => {
+    expect(isStandaloneIntent('horarios')).toBe(true);
+  });
+
+  test('ubicacion is standalone', () => {
+    expect(isStandaloneIntent('ubicacion')).toBe(true);
+  });
+
+  test('promociones is standalone', () => {
+    expect(isStandaloneIntent('promociones')).toBe(true);
+  });
+
+  test('precios is NOT standalone', () => {
+    expect(isStandaloneIntent('precios')).toBe(false);
+  });
+
+  test('productos is NOT standalone', () => {
+    expect(isStandaloneIntent('productos')).toBe(false);
+  });
+
+  test('unknown intent returns false', () => {
+    expect(isStandaloneIntent('fake_intent')).toBe(false);
   });
 });

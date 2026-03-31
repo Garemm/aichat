@@ -1053,7 +1053,7 @@ function formatProductResponse(entity, products) {
     return `  • ${status} *${p.name}* — $${Number(p.price).toFixed(2)}`;
   });
   return (
-    `🔍 Encontré ${products.length} productos relacionados con "*${entity}*":\n` +
+    `🔍 Si, encontré ${products.length} productos relacionados con "*${entity}*":\n` +
     lines.join('\n')
   );
 }

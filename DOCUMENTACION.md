@@ -1,6 +1,6 @@
 # LLM Chat AI — Documentación del Proyecto
 
-> Última actualización: 30 de marzo de 2026 — Sprint 6  
+> Última actualización: 30 de marzo de 2026 — Sprint 6 (context pipeline + tests)  
 > Estado: desarrollo activo
 
 ---
@@ -52,6 +52,7 @@ LLM Chat AI business/
 │       │   └── messageRoutes.js
 │       ├── services/
 │       │   ├── businessInfoService.js      Despacha intenciones → BusinessModel
+│       │   ├── conversationalContext.js    Funciones puras de resolución de contexto
 │       │   ├── intentResponseFormatter.js  Convierte filas DB → texto legible
 │       │   ├── intentService.js            Detecta intención por palabras clave
 │       │   ├── messageService.js           Lógica de guardado/lectura de mensajes
@@ -65,12 +66,15 @@ LLM Chat AI business/
 ├── tests/                          Suite de testing (Jest)
 │   ├── setup.js                    Variables de entorno para el entorno de pruebas
 │   └── unit/
-│       ├── intentService.test.js            Tests de detección de intenciones
-│       ├── nlpEntityExtractor.test.js       Tests del extractor NLP (DB mockeada)
-│       ├── intentResponseFormatter.test.js  Tests de todos los formateadores
 │       ├── businessInfoService.test.js      Tests del QUERY_MAP (BusinessModel mockeado)
+│       ├── conversationalFlow.test.js       Tests de integración del pipeline multi-turno
+│       ├── intentResponseFormatter.test.js  Tests de todos los formateadores
+│       ├── intentService.test.js            Tests de detección de intenciones
+│       ├── keywordResponses.test.js         Tests de respuestas por palabras clave
 │       ├── messageModel.test.js             Tests del store en memoria
-│       └── keywordResponses.test.js         Tests de respuestas por palabras clave
+│       ├── mockOpenAI.test.js               Tests del mock de OpenAI con contexto
+│       ├── nlpEntityExtractor.test.js       Tests del extractor NLP (DB mockeada)
+│       └── sessionContextService.test.js    Tests de getContext/updateContext (Redis mockeado)
 │
 ├── .github/
 │   └── workflows/
@@ -197,7 +201,7 @@ Usuario escribe "cuando abren?"
 
 ### 4.2 Backend — pipeline de procesamiento con contexto
 
-El evento `send_message` ahora recibe `{ roomId, sender, text, sessionId }`.  
+El evento `send_message` recibe `{ roomId, sender, text, sessionId }`.  
 El `sessionId` (UUID generado en el frontend) es la clave de Redis que mantiene el contexto de la conversación.
 
 ```
@@ -217,30 +221,45 @@ Mensaje recibido: { text: "¿y cuánto cuesta?", sessionId: "a3f2..." }
         │  Ejemplo: context = { lastIntent: null, lastProduct: "hamburguesa" }
         │
         ├─────────────────────────────────────────────────────────
-        │  PASO 2 — Detección dual en el mensaje actual
+        │  PASO 2 — Detección del mensaje actual (3 mecanismos)
         │
-        │  A) extractProductEntity(normalize(text))
+        │  A) extractProductEntity(normalize(text))  [Regex + NLP]
         │     Extrae el nombre de producto del mensaje:
         │       "¿y cuánto cuesta?" → null  (no hay producto nombrado)
         │       "tienen pizza doble?" → "pizza doble"
         │
-        │  B) detectIntent(text)
+        │  B) detectIntent(text)  [Keyword matching]
         │     Detecta el tema por palabras clave:
         │       "¿y cuánto cuesta?" → "precios"  (keyword "cuánto cuesta")
         │       "cuando abren?"     → "horarios"
         │
+        │  C) extractFollowUpProduct(normalized, context.lastProduct)  [Follow-up]
+        │     Solo activa si A) y B) devuelven null Y hay lastProduct en contexto.
+        │     Captura mensajes tipo "¿Y pizza mexicana?" (empieza con "y ").
+        │     Rechaza palabras interrogativas (no es una pregunta de acción).
+        │       "¿Y pizza mexicana?" + lastProduct="pizza" → "pizza mexicana"
+        │       "¿Y cuánto cuesta?"  + lastProduct="pizza" → null (interrogativa)
+        │
         ├─────────────────────────────────────────────────────────
         │  PASO 3 — Resolución efectiva con fallback de contexto
+        │  (resolveEffectiveContext — conversationalContext.js)
         │
-        │  effectiveProduct = detectedProduct
-        │      || (detectedIntent ? context.lastProduct : null)
+        │  4 prioridades en orden:
         │
-        │  Para "¿y cuánto cuesta?":
-        │    detectedProduct = null
-        │    detectedIntent  = "precios"
-        │    context.lastProduct = "hamburguesa"
-        │    → effectiveProduct = "hamburguesa"  ← heredado del contexto
-        │    → effectiveIntent  = "precios"
+        │  1. Nuevo producto detectado → producto track, effectiveIntent = null
+        │       "tienen pizza?" → effectiveProduct="pizza", effectiveIntent=null
+        │
+        │  2. Intent STANDALONE (horarios, ubicacion) → ignora lastProduct
+        │       "¿a qué hora abren?" después de hablar de pizza:
+        │       → effectiveProduct=null, effectiveIntent="horarios"
+        │       (evita mezclar la respuesta de horarios con el producto previo)
+        │
+        │  3. Intent dependiente de producto → hereda lastProduct del contexto
+        │       "¿y cuánto cuesta?" (precios) + lastProduct="hamburguesa"
+        │       → effectiveProduct="hamburguesa", effectiveIntent="precios"
+        │
+        │  4. Nada detectado → fallback completo al contexto previo
+        │       sin match alguno → usa context.lastProduct y context.lastIntent
         │
         ├─────────────────────────────────────────────────────────
         │  PASO 4 — Decisión reglas vs IA
@@ -255,6 +274,7 @@ Mensaje recibido: { text: "¿y cuánto cuesta?", sessionId: "a3f2..." }
         │         → formatProductResponse("hamburguesa", rows)
         │    2. Si solo intent → getBusinessInfoByIntent(intent, businessId)
         │         → formatIntentResponse(intent, data)
+        │    3. Si falla la DB → delegar a getMockOpenAIResponse (sin contexto)
         │
         │  handleWithAI:
         │    1. getKeywordResponse(text)  → saludos / frases simples
@@ -262,10 +282,16 @@ Mensaje recibido: { text: "¿y cuánto cuesta?", sessionId: "a3f2..." }
         │       (en producción: llamada real a OpenAI con historial)
         │
         ├─────────────────────────────────────────────────────────
-        │  PASO 5 — updateContext(sessionId, { lastIntent, lastProduct })
+        │  PASO 5 — buildContextUpdate + updateContext  [Redis]
+        │  (buildContextUpdate — conversationalContext.js)
         │
-        │  Guarda en Redis lo detectado en este turno.
-        │  TTL: 210 segundos (3.5 min), renovado con cada mensaje.
+        │  Decide qué persistir según lo detectado en este turno:
+        │    • Producto detectado → guarda producto + limpia intent
+        │    • Intent STANDALONE  → guarda intent + limpia producto
+        │    • Intent dependiente → guarda solo intent (merge preserva lastProduct)
+        │    • Nada detectado     → no llama updateContext (sin cambios)
+        │
+        │  TTL: 210 segundos (3.5 min), renovado con cada mensaje activo.
         │  Si Redis no está disponible, el chat sigue sin guardar contexto.
         │
         └─────────────────────────────────────────────────────────
@@ -273,12 +299,13 @@ Mensaje recibido: { text: "¿y cuánto cuesta?", sessionId: "a3f2..." }
 
 #### Tabla de ejemplos con contexto
 
-| Turno | Mensaje | detectedProduct | detectedIntent | effectiveProduct | Respuesta |
-|-------|---------|-----------------|----------------|------------------|-----------|
-| 1 | "tienen hamburguesa doble?" | `hamburguesa doble` | null | `hamburguesa doble` | Tarjeta del producto |
-| 2 | "¿y cuánto cuesta?" | null | `precios` | `hamburguesa doble` (contexto) | Precio de hamburguesa doble |
-| 3 | "cuando abren?" | null | `horarios` | null | Tabla de horarios completa |
-| 4 | "hola" | null | null | null | Respuesta keywordResponses / AI |
+| Turno | Mensaje | detectedProduct | detectedIntent | effectiveProduct | effectiveIntent | Respuesta |
+|-------|---------|-----------------|----------------|------------------|-----------------|-----|
+| 1 | "tienen hamburguesa doble?" | `hamburguesa doble` | null | `hamburguesa doble` | null | Tarjeta del producto |
+| 2 | "¿y cuánto cuesta?" | null | `precios` | `hamburguesa doble` (contexto) | `precios` | Precio de hamburguesa doble |
+| 3 | "¿y pizza mexicana?" (follow-up) | null (regex) → `pizza mexicana` (C) | null | `pizza mexicana` | null | Tarjeta de pizza mexicana |
+| 4 | "cuando abren?" | null | `horarios` (standalone) | null | `horarios` | Tabla de horarios completa |
+| 5 | "hola" | null | null | null | null | Respuesta keywordResponses / AI |
 
 ### 4.3 Backend → Frontend (respuesta)
 
@@ -355,8 +382,18 @@ Capa de acceso al contexto de sesión en Redis. Expone dos funciones:
 
 Ambas funciones capturan internamente los errores de Redis para no cortar el flujo del chat.
 
+### `backend/src/services/conversationalContext.js`
+Funciones puras de resolución de contexto conversacional. Separadas del socket para ser independientemente testeables. Exporta:
+
+- `resolveEffectiveContext(detectedProduct, detectedIntent, context)` — aplica las 4 prioridades para determinar `effectiveProduct` y `effectiveIntent`
+- `buildContextUpdate(detectedProduct, detectedIntent)` — construye el objeto parcial a persistir en Redis; gestiona STANDALONE_INTENTS: al detectar horarios/ubicacion limpia `lastProduct` para no mezclar tracks
+- `extractFollowUpProduct(normalizedText, lastProduct)` — captura mensajes `"¿Y X?"` cuando hay un producto-track activo
+- `shouldUseContext(detectedIntent)` — retorna `false` para intents standalone (exportada para tests)
+
+**`STANDALONE_INTENTS`:** Set con `'horarios'` y `'ubicacion'`. Estas intenciones se responden sin necesitar producto. Bug resuelto: sin esta distinción, preguntar `"¿a qué hora abren?"` después de hablar de un producto devolvía una respuesta mezclada con el producto previo.
+
 ### `backend/src/sockets/chatSocket.js`
-Orquestador principal con pipeline de contexto conversacional. El handler `send_message` ahora recibe `sessionId`, recupera contexto de Redis, resuelve `effectiveProduct`/`effectiveIntent` con fallback al contexto previo, delega a `handleWithRules` o `handleWithAI`, y actualiza el contexto tras cada turno.
+Orquestador principal con pipeline de contexto conversacional. El handler `send_message` recibe `sessionId`, recupera contexto de Redis, ejecuta los tres mecanismos de detección (NLP, keywords, follow-up), delega la resolución a `conversationalContext.resolveEffectiveContext()`, decide entre `handleWithRules` o `handleWithAI`, y persiste solo si hay cambios con `buildContextUpdate()`.
 
 ### `frontend/src/services/socketService.js`
 Singleton de socket.io-client. Agrega `getSessionId()`: genera un UUID v4 con `crypto.randomUUID()` la primera vez y lo persiste en `sessionStorage`. No almacena contexto del negocio — sólo el identificador de sesión.
@@ -427,6 +464,7 @@ Proxy de desarrollo: `/socket.io` → `http://localhost:3000` (websocket) y `/ap
 |---|---|
 | `backend/src/config/redis.js` | Cliente ioredis singleton con lazyConnect y retryStrategy |
 | `backend/src/services/sessionContextService.js` | `getContext` / `updateContext` con TTL 210 s en Redis |
+| `backend/src/services/conversationalContext.js` | Funciones puras: `resolveEffectiveContext`, `buildContextUpdate`, `extractFollowUpProduct`, `shouldUseContext` |
 
 #### Archivos modificados
 
@@ -435,7 +473,7 @@ Proxy de desarrollo: `/socket.io` → `http://localhost:3000` (websocket) y `/ap
 | `backend/src/config/env.js` | Agrega `REDIS_HOST`, `REDIS_PORT` |
 | `backend/src/services/nlpEntityExtractor.js` | Exporta `queryProductByEntity` y `formatProductResponse` para reuso en chatSocket |
 | `backend/src/temp/mockOpenAI.js` | Recibe `context` y genera respuestas coherentes con `lastProduct` / `lastIntent` |
-| `backend/src/sockets/chatSocket.js` | Pipeline reescrito con contexto: `getContext` → detección dual → resolución efectiva → `handleWithRules`/`handleWithAI` → `updateContext` |
+| `backend/src/sockets/chatSocket.js` | Pipeline reescrito con contexto: `getContext` → detección triple (entity + intent + follow-up) → `resolveEffectiveContext` → `handleWithRules`/`handleWithAI` → `buildContextUpdate` + `updateContext` |
 | `frontend/src/services/socketService.js` | Agrega `getSessionId()` con `crypto.randomUUID()` + `sessionStorage` |
 | `frontend/src/hooks/useSocket.js` | `sendMessage` incluye `sessionId` en el payload |
 | `backend/.env` *(si existe)* | Agregar `REDIS_HOST=localhost` y `REDIS_PORT=6379` |
@@ -447,6 +485,12 @@ Proxy de desarrollo: `/socket.io` → `http://localhost:3000` (websocket) y `/ap
 - El contexto expira a los 3.5 minutos de inactividad (TTL Redis)
 - Si Redis no está disponible, el chat responde sin contexto (degradación elegante)
 - Preguntas de seguimiento como "¿y cuánto cuesta?" usan el producto del turno anterior
+- Preguntas de refinamiento como "¿Y pizza mexicana?" detectadas con `extractFollowUpProduct`
+- Intenciones standalone (`horarios`, `ubicacion`) responden sin mezclar el producto previo
+
+#### Bug resuelto
+
+- **Track mixing:** usuario pregunta `"pizza"` → luego `"¿a qué hora abren?"` → el pipeline anterior devolvía `effectiveProduct="pizza"` + `effectiveIntent="horarios"`, lo que podía producir una respuesta sobre horarios mezclada con el producto. Con `STANDALONE_INTENTS`, `horarios` y `ubicacion` ignoran el `lastProduct` del contexto y limpian el track al guardarlo.
 
 ---
 
@@ -469,7 +513,7 @@ Proxy de desarrollo: `/socket.io` → `http://localhost:3000` (websocket) y `/ap
 | `tests/unit/keywordResponses.test.js` | Keywords conocidas, case-insensitive, keyword en oración larga, sin match, null/undefined/empty guard — 16 casos |
 | `.github/workflows/ci.yml` | Pipeline en 3 jobs: **lint** (ESLint, Node 20) → **test** (matrix Node 18 y 20, artifacts JUnit) → **coverage** (Node 20, artifacts HTML, Codecov) |
 
-#### Resultado de los tests
+#### Resultado de los tests (Sprint 5)
 
 ```
 Test Suites: 6 passed, 6 total
@@ -477,15 +521,33 @@ Tests:       179 passed, 179 total
 Time:        ~4 s
 ```
 
-#### Bug encontrado y corregido durante testing
+#### Bugs encontrados y corregidos durante testing
 - La keyword `"sale"` en `intents.js` (intent `promociones`) era un substring de `"sucursales"`, provocando que mensajes de ubicación fueran clasificados como promociones. Se eliminó `"sale"` del árbol.
 - Typo `coverageThresholds` → `coverageThreshold` en `package.json` (Jest validation warning).
+
+### Sprint 6 (cont.) — Tests del sistema de contexto  *(30 mar 2026)*
+
+Junto con los archivos de producción del Sprint 6, se crearon 3 nuevos archivos de test:
+
+| Archivo | Propósito | Casos |
+|---|---|---|
+| `tests/unit/sessionContextService.test.js` | `getContext` / `updateContext` con ioredis mockeado (Map en memoria); TTL, merge parcial, resiliencia a JSON inválido | ~30 |
+| `tests/unit/mockOpenAI.test.js` | `getMockOpenAIResponse()` sin contexto, con `lastProduct`, con `lastIntent`, prioridad producto > intent | ~20 |
+| `tests/unit/conversationalFlow.test.js` | Tests de integración del pipeline completo: `resolveEffectiveContext`, `buildContextUpdate`, `extractFollowUpProduct`, `shouldUseContext`, escenarios multi-turno (horarios → pizza → pizza mexicana), TTL expirado | ~40 |
+
+#### Resultado de los tests (Sprint 6)
+
+```
+Test Suites: 9 passed, 9 total
+Tests:       251 passed, 251 total
+Time:        ~4 s
+```
 
 ---
 
 ## 7. Testing
 
-El backend cuenta con una suite de **179 pruebas unitarias** en `backend/tests/unit/`.
+El backend cuenta con una suite de **251 pruebas** en `backend/tests/unit/` distribuidas en **9 suites**.
 
 ### Ejecutar los tests
 
@@ -510,12 +572,27 @@ npm run test:coverage    # Genera reporte HTML en ./coverage/
 }
 ```
 
+### Suites de tests
+
+| Archivo | Módulo cubierto | Aprox. casos |
+|---|---|---|
+| `businessInfoService.test.js` | `QUERY_MAP`, despacho de intents, errores de BD | 13 |
+| `conversationalFlow.test.js` | Pipeline multi-turno completo, `resolveEffectiveContext`, `buildContextUpdate`, `extractFollowUpProduct` | ~40 |
+| `intentResponseFormatter.test.js` | Todos los formateadores, `formatTime`, fallbacks vacíos/null | 34 |
+| `intentService.test.js` | Detección de 5 intents, edge cases accent/case insensitive | 70 |
+| `keywordResponses.test.js` | Keywords conocidas, sin match, guards null/undefined/empty | 16 |
+| `messageModel.test.js` | `create()`, `findByRoom()`, `clear()` | 10 |
+| `mockOpenAI.test.js` | `getMockOpenAIResponse()` con/sin contexto, prioridades | ~20 |
+| `nlpEntityExtractor.test.js` | `normalize()`, 14 patrones regex, blocklist, trigger words guard | 36 |
+| `sessionContextService.test.js` | `getContext` / `updateContext`, merge parcial, resiliencia JSON | ~30 |
+
 ### Estrategia de mocking
 
 | Módulo mockeado | Usado en test | Razón |
 |---|---|---|
-| `../../src/config/database` | `nlpEntityExtractor.test.js` | Evitar conexión real a PostgreSQL |
+| `../../src/config/database` | `nlpEntityExtractor.test.js`, `conversationalFlow.test.js` | Evitar conexión real a PostgreSQL |
 | `../../src/models/businessModel` | `businessInfoService.test.js` | Aislar la lógica de despacho del QUERY_MAP |
+| `ioredis` | `sessionContextService.test.js`, `conversationalFlow.test.js` | Evitar conexión real a Redis (Map en memoria como sustituto) |
 
 Todos los demás módulos se prueban con código real (ninguna dependencia externa ejecutada).
 
