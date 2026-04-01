@@ -70,20 +70,36 @@ const intents = {
     keywords: [
       // Frases completas (weight 3)
       { phrase: 'que productos tienen', weight: 3 },
+      { phrase: 'que productos tienes', weight: 3 },
+      { phrase: 'que productos tiene',  weight: 3 },
       { phrase: 'que venden', weight: 3 },
+      { phrase: 'que vendes', weight: 3 },
+      { phrase: 'que vende',  weight: 3 },
       { phrase: 'catalogo de productos', weight: 3 },
       { phrase: 'lista de productos', weight: 3 },
       { phrase: 'me pueden mostrar sus productos', weight: 3 },
       { phrase: 'que tienen para vender', weight: 3 },
+      { phrase: 'que tienes para vender', weight: 3 },
+      { phrase: 'que tiene para vender',  weight: 3 },
       { phrase: 'que articulos manejan', weight: 3 },
-      { phrase: 'que servicios ofrecen', weight: 3 },
+      { phrase: 'que articulos tienes',  weight: 3 },
+      { phrase: 'que articulos tiene',   weight: 3 },
+      { phrase: 'que servicios ofrecen',  weight: 3 },
+      { phrase: 'que servicios tienes',   weight: 3 },
+      { phrase: 'que servicios ofrece',   weight: 3 },
       // Frases parciales (weight 2)
       { phrase: 'hay stock', weight: 2 },
       { phrase: 'tienen en existencia', weight: 2 },
+      { phrase: 'tienes en existencia',  weight: 2 },
       { phrase: 'hay disponibilidad', weight: 2 },
       { phrase: 'tienen inventario', weight: 2 },
+      { phrase: 'tienes inventario',  weight: 2 },
       { phrase: 'manejan productos', weight: 2 },
-      { phrase: 'venden productos', weight: 2 },
+      { phrase: 'venden productos',  weight: 2 },
+      { phrase: 'que tienes',  weight: 2 },
+      { phrase: 'que tiene',   weight: 2 },
+      { phrase: 'que tipo de', weight: 2 },
+      { phrase: 'que tipos de', weight: 2 },
       // Palabras sueltas (weight 1)
       { phrase: 'catalogo', weight: 1 },
       { phrase: 'inventario', weight: 1 },
@@ -148,6 +164,29 @@ const intents = {
       { phrase: 'oferta', weight: 1 },
       { phrase: 'liquidacion', weight: 1 },
       { phrase: 'remate', weight: 1 },
+    ],
+  },
+
+  descripcion: {
+    name: 'descripcion',
+    standalone: false,
+    keywords: [
+      // Frases con "que + verbo 3ª persona" (también cubiertas por prioridad en intentDetector)
+      { phrase: 'que contiene',        weight: 3 },
+      { phrase: 'que contienen',       weight: 3 },
+      { phrase: 'que incluye',         weight: 3 },
+      { phrase: 'que incluyen',        weight: 3 },
+      { phrase: 'que trae',            weight: 3 },
+      { phrase: 'que traen',           weight: 3 },
+      { phrase: 'de que esta hecho',   weight: 3 },
+      // Frases descriptivas explícitas (weight 3)
+      { phrase: 'caracteristicas de',  weight: 3 },
+      { phrase: 'especificaciones de', weight: 3 },
+      { phrase: 'descripcion de',      weight: 3 },
+      { phrase: 'informacion de',      weight: 3 },
+      // Palabras sueltas descriptivas (weight 2)
+      { phrase: 'caracteristicas',     weight: 2 },
+      { phrase: 'especificaciones',    weight: 2 },
     ],
   },
 

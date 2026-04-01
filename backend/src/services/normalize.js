@@ -36,13 +36,45 @@ function normalize(text) {
 /**
  * Tries basic singular from a Spanish plural.
  * NOT a full stemmer — handles common suffixes only.
+ *
+ * Algorithm for -es ending words:
+ *   - If stem ends in a VOWEL → the word was vowel-final-stem + 's' → remove only 's'
+ *     Example: paquetes → stem="paquete" (ends 'e') → remove 's' → "paquete"
+ *   - If stem ends in CONSONANT+CONSONANT cluster → vowel-final-stem + 's' → remove only 's'
+ *     Example: cables → stem="cabl" (ends 'bl') → remove 's' → "cable"
+ *   - If stem ends in VOWEL+CONSONANT → consonant-final-stem + 'es' → remove 'es'
+ *     Example: marcadores → stem="marcador" (ends 'or') → remove 'es' → "marcador"
  * @param {string} word
  * @returns {string}
  */
 function toSingular(word) {
   if (word.endsWith('ces')) return word.slice(0, -3) + 'z';   // lapices → lapiz
   if (word.endsWith('iones')) return word.slice(0, -5) + 'ion'; // promociones → promocion
-  if (word.endsWith('es') && word.length > 4) return word.slice(0, -2); // marcadores → marcador
+  if (word.endsWith('es') && word.length > 4) {
+    const stem = word.slice(0, -2);
+    const last = stem[stem.length - 1];
+    const penultimate = stem[stem.length - 2];
+    const VOWELS = 'aeiou';
+    if (VOWELS.includes(last)) {
+      // Stem ends in vowel → vowel-final-stem + 's' → remove just 's'
+      // Example: paquetes→paquete, nombres→nombre (stem "nombr" ignored, ends in 'r')
+      // Wait: nombres → stem="nombr" ends in 'r' (consonant) → falls through to next checks
+      // This branch only fires when last char of stem is a vowel: paquetes→paquete ✓
+      return word.slice(0, -1);
+    }
+    if (penultimate && !VOWELS.includes(penultimate)) {
+      // Stem ends in consonant cluster (CC) → original stem ended in vowel → remove 's'
+      // Example: cables="cabl" (last='l', penultimate='b' consonant) → "cable"
+      //          muebles="muebl" (last='l', penultimate='b') → "mueble"
+      //          nombres="nombr" (last='r', penultimate='b') → "nombre"
+      return word.slice(0, -1);
+    }
+    // Stem ends in vowel+consonant → consonant-final-stem + 'es' → remove 'es'
+    // Example: marcadores="marcador" (last='r', penultimate='o' vowel) → "marcador"
+    //          hoteles="hotel" (last='l', penultimate='e' vowel) → "hotel"
+    //          canales="canal" (last='l', penultimate='a' vowel) → "canal"
+    return stem;
+  }
   if (word.endsWith('s') && !word.endsWith('ss')) return word.slice(0, -1);
   return word;
 }

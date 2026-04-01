@@ -27,6 +27,7 @@
  */
 
 const { normalize } = require('./normalize');
+const { preprocessMessage } = require('./textPreprocessor');
 const { detectIntent, isStandaloneIntent } = require('./intentDetector');
 const { detectEntities, queryProducts, formatProductResponse } = require('./entityDetector');
 const { detectDay } = require('./dayDetector');
@@ -38,7 +39,7 @@ const {
   getProductosByCategory,
   countProductosByCategory,
 } = require('./businessInfoService');
-const { formatIntentResponse, formatHorarioDay, formatList } = require('./intentResponseFormatter');
+const { formatIntentResponse, formatHorarioDay, formatList, formatDescripcionResponse } = require('./intentResponseFormatter');
 const { getKeywordResponse } = require('../mockai/keywordResponses');
 const { getMockOpenAIResponse } = require('../temp/mockOpenAI');
 
@@ -186,26 +187,81 @@ const QUESTION_WORDS = new Set([
 ]);
 
 /**
- * Extracts a product entity from "¿Y pizza mexicana?" style follow-ups.
+ * Extracts a product entity from follow-up messages in an active product context.
+ * Handles two shapes:
+ *   1. "¿Y pizza mexicana?" — starts with "y"
+ *   2. Bare noun phrase — 2-5 tokens, no question or verb words
+ *      e.g. "pizza mexicana", "pizza bbq al pastor"
+ *
  * Only active when there's a lastEntity in context (product-track).
  *
  * @param {string} normalizedText
- * @param {{ value: string|null }} lastEntity
+ * @param {{ value: string|null, type: string|null }} lastEntity
  * @returns {string|null}
  */
+/**
+ * If a follow-up candidate starts with a preposition ("de", "del", "con", "al"),
+ * reconstruct the full entity by prepending the base word from context.
+ *
+ * Example: lastEntityValue="agua de limon", candidate="de jamaica" → "agua de jamaica"
+ * Example: lastEntityValue="tacos al pastor", candidate="al carbon" → "tacos al carbon"
+ *
+ * @param {string} candidate       Raw extracted follow-up candidate
+ * @param {string} contextValue    lastEntity.value from context
+ * @returns {string}
+ */
+function enrichFollowUpCandidate(candidate, contextValue) {
+  const PREP_PREFIX = /^(?:de[l]?|con|en|al|a)\s+/;
+  if (!PREP_PREFIX.test(candidate) || !contextValue) return candidate;
+  // Extract base of context entity (everything before the first preposition)
+  const baseMatch = contextValue.match(/^(.+?)\s+(?:de[l]?|con|en|al|a)\s+/);
+  if (baseMatch?.[1]) {
+    return `${baseMatch[1]} ${candidate}`;
+  }
+  return candidate;
+}
+
 function extractFollowUpEntity(normalizedText, lastEntity) {
   if (!lastEntity?.value) return null;
 
-  const match = normalizedText.match(/^y\s+(?<entity>[\w\s]+?)$/);
-  if (!match?.groups?.entity) return null;
+  // Shape 1a: "y pizza mexicana" / "y de jamaica" — starts with "y"
+  const matchY = normalizedText.match(/^y\s+(?<entity>[\w\s]+?)$/);
+  if (matchY?.groups?.entity) {
+    const candidate = matchY.groups.entity.trim();
+    if (candidate.length >= 2 && !candidate.split(/\s+/).some((w) => QUESTION_WORDS.has(w))) {
+      return enrichFollowUpCandidate(candidate, lastEntity.value);
+    }
+  }
 
-  const candidate = match.groups.entity.trim();
-  if (candidate.length < 2) return null;
+  // Shape 1b: starts with "tambien / igual / otro / otra" (+ optional article)
+  const matchTrigger = normalizedText.match(
+    /^(?:tambien|igual|otro|otra|tb|tmb)\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)$/
+  );
+  if (matchTrigger?.groups?.entity) {
+    const candidate = matchTrigger.groups.entity.trim();
+    if (candidate.length >= 2 && !candidate.split(/\s+/).some((w) => QUESTION_WORDS.has(w))) {
+      return enrichFollowUpCandidate(candidate, lastEntity.value);
+    }
+  }
 
-  const words = candidate.split(/\s+/);
-  if (words.some((w) => QUESTION_WORDS.has(w))) return null;
+  // Shape 2: bare noun phrase (2-5 tokens, no question/meta/verb words)
+  // Catches "pizza mexicana", "pizza bbq" when user refines a product search
+  const BARE_SKIP = new Set([
+    ...QUESTION_WORDS,
+    'hay', 'tienen', 'tienes', 'tiene', 'venden', 'vende', 'vendes',
+    'busco', 'quiero', 'necesito', 'existen', 'existe', 'ofrecen', 'ofrece',
+    'si', 'no', 'ok', 'ya', 'hola', 'gracias', 'buenas', 'saludos',
+    // Follow-up trigger words — excluded so Shape 2 doesn't include them in the entity
+    'tambien', 'igual', 'otro', 'otra', 'tb', 'tmb',
+  ]);
+  const tokens = normalizedText.split(/\s+/);
+  if (tokens.length >= 2 && tokens.length <= 5) {
+    if (!tokens.some((w) => BARE_SKIP.has(w)) && normalizedText.length >= 3) {
+      return normalizedText;
+    }
+  }
 
-  return candidate;
+  return null;
 }
 
 // ─── Decision engine ──────────────────────────────────────────────────────────
@@ -281,8 +337,12 @@ function decide(intentResult, entityResult, context, normalizedText) {
 
   // Rule 2: Clear entity detected in message → use it directly, NO context
   if (hasEntity) {
-    // If we also have an intent, combine them
-    const effectiveIntent = hasIntent ? intentResult.intent : null;
+    // If we also have an intent, combine them; otherwise infer 'productos' for product/category entities
+    const effectiveIntent = hasIntent
+      ? intentResult.intent
+      : (entityResult.type === 'product' || entityResult.type === 'category')
+        ? 'productos'
+        : null;
     return {
       strategy: 'entity',
       intent: effectiveIntent,
@@ -328,31 +388,56 @@ function decide(intentResult, entityResult, context, normalizedText) {
   // Rule 4: Ambiguous message → use context if available
   if (isAmbiguous(normalizedText)) {
     if (context.lastEntity?.value || context.lastIntent) {
+      // If the last entity was NOT found in DB, treat as catalog intent (entity.value = null)
+      // so a bare "sí" after a miss shows the catalog instead of re-querying the dead entity.
+      const entityForAmbiguous = (context.lastEntityFound === false)
+        ? { type: null, value: null }
+        : (context.lastEntity?.value
+          ? { type: context.lastEntity.type, value: context.lastEntity.value }
+          : { type: null, value: null });
       return {
         strategy: 'context',
         intent: context.lastIntent,
-        entity: context.lastEntity?.value
-          ? { type: context.lastEntity.type, value: context.lastEntity.value }
-          : { type: null, value: null },
+        entity: entityForAmbiguous,
         usedContext: true,
         reason: `ambiguous message, using context`,
       };
     }
   }
 
-  // Rule 5: Check for follow-up entity ("¿Y pizza mexicana?")
+  // Rule 5: Check for follow-up entity ("¿Y pizza mexicana?", "tambien X", bare noun)
   const followUp = extractFollowUpEntity(normalizedText, context.lastEntity);
   if (followUp) {
     return {
       strategy: 'followup',
-      intent: null,
+      intent: context.lastIntent ?? null,   // reuse last intent (e.g. 'productos')
       entity: { type: 'product', value: followUp },
       usedContext: true,
       reason: `follow-up entity: "${followUp}"`,
     };
   }
 
-  // Rule 6: Fallback to AI
+  // Rule 6: Anti-fallback — if there is valid context but no entity/intent could
+  // be resolved from this message, prefer context over AI for short messages.
+  // This handles ambiguous continuations like "y ese?" that isAmbiguous() misses.
+  // Skip if the last entity was a miss (would re-query a known-empty product).
+  if (context.lastEntity?.value && context.lastEntityFound !== false &&
+      normalizedText.length >= 2 && normalizedText.length <= 40) {
+    const hasNewTopic = normalizedText.split(/\s+/).some((w) =>
+      ['horario', 'horarios', 'direccion', 'contacto', 'promos', 'promociones', 'descuentos'].includes(w)
+    );
+    if (!hasNewTopic) {
+      return {
+        strategy: 'context',
+        intent: context.lastIntent ?? null,
+        entity: { type: context.lastEntity.type, value: context.lastEntity.value },
+        usedContext: true,
+        reason: `anti-fallback: using context entity "${context.lastEntity.value}"`,
+      };
+    }
+  }
+
+  // Rule 7: Fallback to AI
   return {
     strategy: 'ai',
     intent: null,
@@ -386,6 +471,7 @@ function buildContextUpdate(decision) {
     return {
       lastIntent: decision.intent,
       lastEntity: entityToStore,
+      lastEntityFound: true,   // reset to true; processMessage overrides to false on DB miss
       // New entity detected → clear any lingering pagination / category state
       paginationCategory: null,
       paginationOffset: null,
@@ -394,9 +480,10 @@ function buildContextUpdate(decision) {
     };
   }
 
-  // Follow-up entity → update entity track
+  // Follow-up entity → update entity track, keep intent
   if (decision.strategy === 'followup' && decision.entity?.value) {
     return {
+      lastIntent: decision.intent,   // persist reused intent (may be null — that's OK)
       lastEntity: { type: decision.entity.type, value: decision.entity.value },
       paginationCategory: null,
       paginationOffset: null,
@@ -501,8 +588,45 @@ async function executeDecision(decision, originalText, businessId, context, sess
     }
   }
 
+  // Description request: intent=descripcion → show product/service description
+  if (decision.intent === 'descripcion') {
+    if (!decision.entity?.value) {
+      return '¿Sobre qué producto o servicio deseas más información?';
+    }
+    try {
+      const rows = await queryProducts(decision.entity.value, businessId);
+      return formatDescripcionResponse(decision.entity.value, rows);
+    } catch (err) {
+      console.error('[Pipeline] Error querying description:', err.message);
+    }
+  }
+
   // Entity-based response: query product/category
   if (decision.entity?.value && (decision.strategy === 'entity' || decision.strategy === 'context' || decision.strategy === 'followup')) {
+    // Category entity (e.g. "que bebidas tienen", "que tipo de bebidas tienen") →
+    // show the first page of products for that category
+    if (decision.entity.type === 'category') {
+      try {
+        const cat   = decision.entity.value;
+        const total = await countProductosByCategory(businessId, cat);
+        const rows  = await getProductosByCategory(businessId, cat, PAGE_SIZE, 0);
+        await updateContext(sessionId, {
+          lastIntent: 'productos',
+          lastEntity: { type: 'category', value: cat },
+          paginationCategory: cat,
+          paginationOffset: 0,
+          paginationTotal: total,
+          availableCategories: null,
+        });
+        if (rows.length === 0) {
+          return `No encontré productos en la categoría "${cat}".`;
+        }
+        return formatProductPage(rows, 0, total, cat);
+      } catch (err) {
+        console.error('[Pipeline] Error loading category from entity:', err.message);
+      }
+    }
+
     if (decision.entity.type === 'product') {
       try {
         const rows = await queryProducts(decision.entity.value, businessId);
@@ -511,8 +635,6 @@ async function executeDecision(decision, originalText, businessId, context, sess
         console.error('[Pipeline] Error querying product:', err.message);
       }
     }
-    // For category entities + precios intent → query products in that category
-    // For now, fall through to intent handler if there's one
   }
 
   // Intent-based response
@@ -559,19 +681,19 @@ async function executeDecision(decision, originalText, businessId, context, sess
  * @returns {Promise<{ replyText: string, decision: PipelineDecision, logs: object }>}
  */
 async function processMessage({ text, sessionId, businessId }) {
-  // 1. Normalize
-  const normalizedText = normalize(text);
+  // 1. Preprocess: normalize + expand abbreviations + correct typos
+  const normalizedText = preprocessMessage(text);
 
   // 2. Detect day entity (highest priority — skips DB lookup entirely)
   const dayEntity = detectDay(normalizedText);
 
-  // 3. Detect intent (scoring)
-  const intentResult = detectIntent(text);
+  // 3. Detect intent (scoring) — pass preprocessed text so typos are already corrected
+  const intentResult = detectIntent(normalizedText);
 
   // 4. Detect entities (DB lookup — skipped when day detected)
   const entityResult = dayEntity
     ? dayEntity
-    : await detectEntities(text, businessId, intentResult);
+    : await detectEntities(normalizedText, businessId, intentResult);
 
   // 5. Get context from Redis
   const context = await getContext(sessionId);
@@ -599,23 +721,21 @@ async function processMessage({ text, sessionId, businessId }) {
   const replyText = await executeDecision(decision, text, businessId, context, sessionId);
 
   // 7. Update context
-  // Special case: if a product entity was detected in text but NOT found in DB,
-  // the bot responds "no encontré… ¿Quieres ver el catálogo completo?".
-  // Store intent=productos (the offered action) and clear the dead-end entity,
-  // so a follow-up "sí" shows the catalog instead of re-querying the same miss.
+  // When a product entity was detected but NOT found in DB:
+  //   • Keep lastEntity in context so "y de X" follow-ups can refine the search
+  //   • Set lastEntityFound=false so a bare "sí" shows the catalog (not a re-query)
   let contextUpdate;
-  if (decision.strategy === 'entity' &&
-      decision.entity?.type === 'product' &&
-      entityResult._rows?.length === 0) {
-    contextUpdate = {
-      lastIntent: 'productos',
-      lastEntity: { type: null, value: null },
-    };
-  } else if (decision._ctxOverride !== undefined) {
-    // executeDecision computed a specific context update (e.g. category pivot)
+  if (decision._ctxOverride !== undefined) {
     contextUpdate = decision._ctxOverride;
   } else {
     contextUpdate = buildContextUpdate(decision);
+    if (
+      decision.strategy === 'entity' &&
+      decision.entity?.type === 'product' &&
+      entityResult._rows?.length === 0
+    ) {
+      contextUpdate.lastEntityFound = false;
+    }
   }
 
   if (Object.keys(contextUpdate).length > 0) {

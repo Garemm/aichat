@@ -47,6 +47,16 @@ const ENTITY_BLOCKLIST = new Set([
   'servicio', 'servicios', 'oferta', 'ofertas',
   'algo', 'todo', 'nada', 'mucho', 'poco',
   'promocion', 'promociones', 'descuento', 'descuentos',
+  // Intent-domain words — these are intent names, not valid product entities.
+  // Without blocking them, "que horarios tienen?" would extract "horarios" as
+  // a false product entity and override the correct intent routing.
+  'horario', 'horarios',
+  'precios',          // singular 'precio' already covered below
+  'ubicacion', 'ubicaciones',
+  // Verb forms — Compromise NLP can extract conjugated verb stems as nouns
+  // (e.g. "tienen" from "que promociones tienen"). Block all common forms.
+  'tiene', 'tienen', 'tienes', 'tener',
+  'hay', 'haber',
   // Question words — never entity names
   'cuanto', 'cuanta', 'cuantos', 'cuantas',
   'cuando', 'donde', 'como', 'cual', 'cuales', 'quien',
@@ -70,7 +80,7 @@ function stripLeadingStopwords(entity) {
 // ─── Trigger words for NLP fallback ───────────────────────────────────────────
 
 const PRODUCT_TRIGGER_WORDS = new Set([
-  'tienen', 'tienes', 'hay', 'busco', 'quiero', 'existe', 'existen',
+  'tiene', 'tienen', 'tienes', 'hay', 'busco', 'quiero', 'existe', 'existen',
   'disponible', 'disponibles', 'stock',
   'conseguir', 'comprar', 'pedir', 'ordenar', 'solicitar',
   'informacion', 'info', 'detalle', 'detalles',
@@ -78,6 +88,8 @@ const PRODUCT_TRIGGER_WORDS = new Set([
   'ofrece', 'ofrecen', 'necesito',
   // Price-query trigger words
   'precio', 'precios', 'cuesta', 'cuanto', 'vale', 'cobran', 'costo',
+  // Description-query trigger words
+  'contiene', 'incluye', 'trae', 'caracteristicas', 'especificaciones', 'descripcion',
 ]);
 
 function hasProductTrigger(normalizedText) {
@@ -87,6 +99,8 @@ function hasProductTrigger(normalizedText) {
 // ─── Extraction regex patterns (industry-agnostic Spanish) ────────────────────
 
 const PRODUCT_QUERY_PATTERNS = [
+  // "cuantas/cuantos X tienes/tienen/hay" — verb AFTER entity
+  /cu[ae]n(?:to|ta)s?\s+(?:de\s+)?(?<entity>[\w\s]+?)\s+(?:tienes?|tienen|hay)(?:\?|$)/,
   /tienen\s+disponible\s+(?<entity>[\w\s]+?)(?:\?|$)/,
   /hay\s+disponibilidad\s+de\s+(?<entity>[\w\s]+?)(?:\?|$)/,
   /cu[ae]nto\s+(?:cuesta|vale|sale|cobran\s+por)\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
@@ -96,8 +110,22 @@ const PRODUCT_QUERY_PATTERNS = [
   /^precio\s+(?:de\s+)?(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
   /precio\s+de\s+(?:el\s+|la\s+|los\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
   /me\s+(?:pueden\s+dar|das?|traes?)\s+(?:el\s+|la\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
-  /tienen\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
-  /tienes\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
+  // "puedes decirme si tienen X" / "me puedes decir si tienen X"
+  /(?:me\s+)?puedes?\s+(?:decirme\s+)?(?:si\s+)?(?:tienen?|hay)\s+(?<entity>[\w\s]+?)(?:\?|$)/,
+  // Availability phrases
+  /esta(?:s|n)?\s+disponible[s]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
+  /hay\s+stock\s+de\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
+  /tiene(?:s|n)?\s+disponibilidad\s+(?:de\s+)?(?:el\s+|la\s+|los\s+|las\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
+  // "que tipo(s) de X tienen/tienes/tiene/hay" — entity inside "que tipo de … verb"
+  // MUST appear before the generic "que X tienen" pattern below.
+  /^que\s+tipos?\s+de\s+(?<entity>[\w]+(?:\s+[\w]+){0,3})\s+(?:tiene[sn]?|tienen|hay)\s*\??$/,
+  /que\s+tipos?\s+de\s+(?<entity>[\w]+(?:\s+[\w]+){0,3})\s+(?:tiene[sn]?|tienen|hay)/,
+  // "que [entity] tienen/tienes/hay?" — entity BETWEEN "que" and trailing verb.
+  // Must run BEFORE the generic tiene[sn]? pattern which would otherwise grab
+  // whatever follows "tienen" (e.g. "disponibles") as the entity.
+  // Distinct from description patterns where verb follows IMMEDIATELY after "que".
+  /^que\s+(?<entity>[\w]+(?:\s+[\w]+){0,4})\s+(?:tiene[sn]?|tienen|hay)\s*(?:[\w]+\s*)?\??$/,
+  /tiene[sn]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
   /hay\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
   /existe[n]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
   /busco\s+(?:un\s+|una\s+|el\s+|la\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
@@ -107,13 +135,46 @@ const PRODUCT_QUERY_PATTERNS = [
   /vende[ns]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
   /ofrece[ns]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
   /necesito\s+(?:un\s+|una\s+|el\s+|la\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
+  // Reversed-order: entity before verb — "X tienes?" / "X hay?"
+  /(?<entity>[\w]+(?:\s+[\w]+){0,3})\s+(?:tienes?|tienen|hay)\s*\?$/,
+  // Description-intent phrases: "que contiene X", "que incluye X", "que trae X"
+  // singular and plural forms, optional article el/la/los/las before entity
+  /(?:que\s+)?contiene[n]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+|este\s+|esta\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
+  /(?:que\s+)?incluye[n]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+|este\s+|esta\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
+  /(?:que\s+)?trae[n]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+|este\s+|esta\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
+  /de\s+que\s+esta[n]?\s+hech[oa]s?\s+(?:el\s+|la\s+|los\s+|las\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
+  // "que tiene/tienen los/las X" — description of entity with article
+  /que\s+tiene[n]?\s+(?:el\s+|la\s+|los\s+|las\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
+  // "caracteristicas de X" / "especificaciones de X" / "descripcion de X"
+  /(?:caracteristicas|especificaciones|descripcion)\s+(?:de[l]?\s+)?(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
 ];
+
+// ─── Entity candidate cleanup ────────────────────────────────────────────────
+
+/**
+ * Strips trailing noise words from an entity candidate.
+ * These words appear at the end of extracted candidates but are not part
+ * of the entity name (e.g. "cables disponibles" → "cables").
+ *
+ * @param {string} entity  Candidate string (normalized, stopwords stripped from start)
+ * @returns {string}
+ */
+function cleanEntityCandidate(entity) {
+  return entity
+    .replace(/\s+disponibles?\s*$/, '')
+    .replace(/\s+en\s+stock\s*$/, '')
+    .replace(/\s+que\s+(?:tengas?|tienen|hay)\s*$/, '')
+    .replace(/\s+para\s+(?:comprar|vender)\s*$/, '')
+    .trim();
+}
 
 // ─── Core extraction logic ────────────────────────────────────────────────────
 
 /**
  * Extracts a raw entity candidate from the normalized message text.
  * Uses regex patterns first, then falls back to NLP noun phrases.
+ * Applies singularization to the extracted candidate so that plurals
+ * like "cables" still match product records named "cable".
  *
  * @param {string} normalizedText
  * @returns {string|null}
@@ -124,8 +185,11 @@ function extractEntityCandidate(normalizedText) {
     const match = normalizedText.match(pattern);
     if (match?.groups?.entity) {
       const raw = match.groups.entity.trim();
-      const cleaned = stripLeadingStopwords(raw);
-      if (cleaned.length >= 2 && !isBlocklisted(cleaned)) return cleaned;
+      const stripped = stripLeadingStopwords(raw);
+      const cleaned = cleanEntityCandidate(stripped);
+      if (cleaned.length >= 2 && !isBlocklisted(cleaned)) {
+        return cleaned;
+      }
     }
   }
 
@@ -137,7 +201,10 @@ function extractEntityCandidate(normalizedText) {
 
   if (nouns.length > 0) {
     const best = nouns
-      .map((n) => stripLeadingStopwords(normalize(n)))
+      .map((n) => {
+        const stripped = stripLeadingStopwords(normalize(n));
+        return cleanEntityCandidate(stripped);
+      })
       .filter((n) => n.length >= 2 && !isBlocklisted(n))
       .sort((a, b) => b.length - a.length)[0];
     if (best) return best;
@@ -250,6 +317,35 @@ async function detectEntities(message, businessId, intentResult = { intent: null
   const empty = { product: null, category: null, promotion: null, type: null, value: null };
 
   const normalizedText = normalize(message);
+
+  // ── "que tipo(s) de X tienen" — check category first, then product ──────────
+  // This pattern signals the user wants a type/kind of product, so a category
+  // match is preferred over an individual-product match.
+  const TIPO_DE_RE = /que\s+tipos?\s+de\s+(?<entity>[\w]+(?:\s+[\w]+){0,3})\s+(?:tiene[sn]?|tienen|hay)/;
+  const tipoMatch = normalizedText.match(TIPO_DE_RE);
+  if (tipoMatch?.groups?.entity) {
+    const tipoCand = cleanEntityCandidate(stripLeadingStopwords(tipoMatch.groups.entity.trim()));
+    if (tipoCand && tipoCand.length >= 2 && !isBlocklisted(tipoCand)) {
+      try {
+        const categoryRows = await queryCategories(tipoCand, businessId);
+        if (categoryRows.length > 0) {
+          return { ...empty, category: tipoCand, type: 'category', value: tipoCand };
+        }
+      } catch (err) {
+        console.error('[EntityDetector] Error querying categories for tipo-de:', err.message);
+      }
+      try {
+        const productRows = await queryProducts(tipoCand, businessId);
+        if (productRows.length > 0) {
+          return { ...empty, product: tipoCand, type: 'product', value: tipoCand, _rows: productRows };
+        }
+      } catch (err) {
+        console.error('[EntityDetector] Error querying products for tipo-de:', err.message);
+      }
+      return { ...empty, product: tipoCand, type: 'product', value: tipoCand, _rows: [] };
+    }
+  }
+
   const candidate = extractEntityCandidate(normalizedText);
 
   if (!candidate) return empty;

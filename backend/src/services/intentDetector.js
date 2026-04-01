@@ -29,6 +29,36 @@ const { normalize } = require('./normalize');
 const MIN_CONFIDENCE = 1;
 
 /**
+ * High-priority pre-check patterns for the 'descripcion' intent.
+ *
+ * These run BEFORE keyword scoring to avoid substring collisions:
+ *   "que tienes".includes("que tiene") === true  → scoring alone would
+ *   incorrectly route catalog questions to 'descripcion'.
+ *
+ * Rules:
+ *  - "que + verb (3rd sg.)"  → descripcion  ONLY when an object follows.
+ *    Bare "que tiene?" / "que tienen?" (= catalog) stay as 'productos'.
+ *  - Plural forms (tienen, contienen, incluyen, traen) are covered too.
+ *  - Articles los/las before the object are allowed: "que tienen los X".
+ *
+ * \b after the verb ensures "que tienes" is never matched (tienes ends in 's',
+ * so \b sits between 's' and the next non-word char — but with [n]? the match
+ * would stop at "tiene" leaving "s" attached, breaking the word boundary).
+ */
+const DESCRIPCION_PRIORITY_PATTERNS = [
+  // singular/plural tiene/tienen + object (with optional article los/las/el/la)
+  /\bque\s+tiene[n]?\b\s+(?:el\s+|la\s+|los\s+|las\s+)?\w/,
+  // singular/plural contiene/contienen
+  /\bque\s+contiene[n]?\b/,
+  // singular/plural incluye/incluyen
+  /\bque\s+incluye[n]?\b/,
+  // singular/plural trae/traen
+  /\bque\s+trae[n]?\b/,
+  // "de que está hecho/hecha"
+  /\bde\s+que\s+est[aá]\b.*\bhech[oa]\b/,
+];
+
+/**
  * Scores each intent against the normalized message and returns a map of
  * intent → score. Only intents with score > 0 are included.
  *
@@ -68,6 +98,15 @@ function detectIntent(message, intentsConfig = intents) {
   if (!message) return { intent: null, score: 0, scores: {}, confident: false };
 
   const normalizedText = normalize(message);
+
+  // High-priority pre-check: "que + verb(3rd sg.)" → 'descripcion'
+  // Must run BEFORE scoring to avoid "que tienes".includes("que tiene") collision.
+  for (const pattern of DESCRIPCION_PRIORITY_PATTERNS) {
+    if (pattern.test(normalizedText)) {
+      return { intent: 'descripcion', score: 5, scores: { descripcion: 5 }, confident: true };
+    }
+  }
+
   const scores = scoreIntents(normalizedText, intentsConfig);
 
   if (Object.keys(scores).length === 0) {

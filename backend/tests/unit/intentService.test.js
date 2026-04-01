@@ -58,8 +58,16 @@ describe('detectIntent()', () => {
       'catalogo de productos',
       'catálogo de productos',
       'lista de productos',
-      'hay disponibilidad de algo',
-    ];
+      'hay disponibilidad de algo',      // nuevas variantes de conjugación (tienes / tiene / vendes / vende)
+      'que productos tienes',
+      'que productos tiene',
+      'que vendes',
+      'que vende',
+      'que tienes',
+      'que tiene',
+      'que tienes para vender',
+      'que articulos tienes',
+      'que articulos tiene',    ];
 
     test.each(PRODUCTOS_CASES)('"%s" → productos', (msg) => {
       expect(detectIntent(msg).intent).toBe('productos');
@@ -123,6 +131,81 @@ describe('detectIntent()', () => {
 
     test.each(UBICACION_CASES)('"%s" → ubicacion', (msg) => {
       expect(detectIntent(msg).intent).toBe('ubicacion');
+    });
+  });
+
+  // ── descripcion ───────────────────────────────────────────────────────────────
+  describe('intent: descripcion', () => {
+    const DESCRIPCION_CASES = [
+      // Singular forms (que + tiene/contiene/incluye/trae)
+      'que tiene este producto',
+      'que tiene la pizza',
+      'que tiene el combo',
+      'que contiene este articulo',
+      'que contiene la hamburguesa',
+      'que incluye',
+      'que incluye el paquete',
+      'que trae',
+      'que trae el set',
+      'de que esta hecho',
+      'de que esta hecho el pan',
+      // Plural forms (que + tienen/contienen/incluyen/traen)
+      'que tienen los chiles en nogada',
+      'que tienen las hamburguesas',
+      'que tienen los tacos',
+      'que contienen los chiles en nogada',
+      'que contienen las pizzas',
+      'que incluyen los combos',
+      'que traen los paquetes',
+      // Frases descriptivas explícitas
+      'caracteristicas de la hamburguesa',
+      'características de la hamburguesa',
+      'especificaciones de X',
+      'descripcion de este articulo',
+      'informacion de la pizza',
+    ];
+
+    test.each(DESCRIPCION_CASES)('"%s" → descripcion', (msg) => {
+      expect(detectIntent(msg).intent).toBe('descripcion');
+    });
+
+    // Diferenciación crítica: "tiene X" ≠ "que tiene X"
+    test('"que tienes" → productos (NO descripcion)', () => {
+      expect(detectIntent('que tienes').intent).toBe('productos');
+      expect(detectIntent('que tienes').intent).not.toBe('descripcion');
+    });
+
+    test('"que tienes para vender" → productos (NO descripcion)', () => {
+      expect(detectIntent('que tienes para vender').intent).toBe('productos');
+    });
+
+    test('"que tienen" (bare, sin objeto) → NO es descripcion', () => {
+      expect(detectIntent('que tienen').intent).not.toBe('descripcion');
+    });
+
+    test('"que tienen?" (bare con signo) → NO es descripcion', () => {
+      expect(detectIntent('que tienen?').intent).not.toBe('descripcion');
+    });
+
+    test('"que productos tienes" → productos (NO descripcion)', () => {
+      expect(detectIntent('que productos tienes').intent).toBe('productos');
+    });
+
+    test('"tiene hamburguesa" → no es descripcion (disponibilidad)', () => {
+      expect(detectIntent('tiene hamburguesa').intent).not.toBe('descripcion');
+    });
+
+    test('"tienen pizza" → no es descripcion (disponibilidad)', () => {
+      expect(detectIntent('tienen pizza').intent).not.toBe('descripcion');
+    });
+
+    // Diferenciación crítica: "que [entidad] tienen" ≠ "que tiene/tienen [entidad]"
+    test('"que hamburguesas tienen" → NO es descripcion (entidad antes del verbo)', () => {
+      expect(detectIntent('que hamburguesas tienen').intent).not.toBe('descripcion');
+    });
+
+    test('"que tacos al pastor tienen" → NO es descripcion', () => {
+      expect(detectIntent('que tacos al pastor tienen').intent).not.toBe('descripcion');
     });
   });
 

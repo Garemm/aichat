@@ -494,10 +494,11 @@ describe('Product not found → "sí" shows catalog', () => {
     expect(t1.decision.strategy).toBe('entity');
     expect(t1.replyText).toContain('no encontré');
 
-    // Verify context was updated to offer catalog, NOT the dead-end entity
+    // Verify context keeps the entity (for follow-up refinement) but marks it as not-found
     const ctxAfterT1 = await getContext(id);
     expect(ctxAfterT1.lastIntent).toBe('productos');
-    expect(ctxAfterT1.lastEntity).toEqual({ type: null, value: null });
+    expect(ctxAfterT1.lastEntity.value).toBe('comida vegana');
+    expect(ctxAfterT1.lastEntityFound).toBe(false);
 
     // Turn 2: "sí" → should use context intent=productos → show catalog
     const t2 = await processMessage({ text: 'Sí', sessionId: id, businessId: BUSINESS_ID });
@@ -523,7 +524,7 @@ describe('Product not found → "sí" shows catalog', () => {
     // Context should track the found entity normally
     const ctx = await getContext(id);
     expect(ctx.lastEntity).toEqual({ type: 'product', value: 'pizza' });
-    expect(ctx.lastIntent).toBeNull();
+    expect(ctx.lastIntent).toBe('productos');
   });
 });
 
@@ -951,4 +952,1091 @@ describe('Paginación: catálogo grande → categorías → paginación', () => 
     expect(ctx.availableCategories).toBeNull();
   });
 });
+
+// ─── "tiene X" — verbo singular tercera persona ──────────────────────────────
+
+describe('"tiene X" — detección verbo+entidad sin tienes/tienen', () => {
+  const BUSINESS_ID = 1;
+  const mockHamburguesa = { id: 1, name: 'Hamburguesa Doble', description: null, price: '120.00', is_available: true, stock_quantity: 8, category: 'Comida' };
+  const mockBbq         = { id: 2, name: 'Hamburguesa BBQ',   description: null, price: '135.00', is_available: true, stock_quantity: 3, category: 'Comida' };
+
+  // ── extractEntityCandidate ────────────────────────────────────────────────
+
+  test('"tiene hamburguesa" → extrae "hamburguesa"', () => {
+    const { extractEntityCandidate } = require('../../src/services/entityDetector');
+    expect(extractEntityCandidate('tiene hamburguesa')).toBe('hamburguesa');
+  });
+
+  test('"tiene hamburguesa bbq" → extrae "hamburguesa bbq"', () => {
+    const { extractEntityCandidate } = require('../../src/services/entityDetector');
+    expect(extractEntityCandidate('tiene hamburguesa bbq')).toBe('hamburguesa bbq');
+  });
+
+  test('"tiene la hamburguesa mexicana" → extrae "hamburguesa mexicana" (elimina artículo)', () => {
+    const { extractEntityCandidate } = require('../../src/services/entityDetector');
+    expect(extractEntityCandidate('tiene la hamburguesa mexicana')).toBe('hamburguesa mexicana');
+  });
+
+  test('"tiene hamburguesas" → extrae "hamburguesas"', () => {
+    const { extractEntityCandidate } = require('../../src/services/entityDetector');
+    expect(extractEntityCandidate('tiene hamburguesas')).toBe('hamburguesas');
+  });
+
+  // ── Full pipeline: estrategia + intent ───────────────────────────────────
+
+  test('"tiene hamburguesa" → strategy=entity, intent=productos, NO fallback', async () => {
+    const id = sid();
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [mockHamburguesa] };
+      return { rows: [] };
+    });
+
+    const { decision } = await processMessage({ text: 'tiene hamburguesa', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(decision.strategy).toBe('entity');
+    expect(decision.intent).toBe('productos');
+    expect(decision.entity.type).toBe('product');
+    expect(decision.entity.value).toBe('hamburguesa');
+    expect(decision.usedContext).toBe(false);
+  });
+
+  test('"tienen hamburguesas" → strategy=entity, entity detectada, NO fallback', async () => {
+    const id = sid();
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [mockHamburguesa] };
+      return { rows: [] };
+    });
+
+    const { decision } = await processMessage({ text: 'tienen hamburguesas', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(decision.strategy).toBe('entity');
+    expect(decision.entity.type).toBe('product');
+    expect(['hamburguesas', 'hamburguesa']).toContain(decision.entity.value);
+  });
+
+  test('"tiene hamburguesa bbq" → strategy=entity, entity="hamburguesa bbq"', async () => {
+    const id = sid();
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [mockBbq] };
+      return { rows: [] };
+    });
+
+    const { decision } = await processMessage({ text: 'tiene hamburguesa bbq', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(decision.strategy).toBe('entity');
+    expect(decision.intent).toBe('productos');
+    expect(decision.entity.value).toBe('hamburguesa bbq');
+  });
+
+  test('"tiene hamburguesa" → replyText contiene nombre del producto', async () => {
+    const id = sid();
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [mockHamburguesa] };
+      return { rows: [] };
+    });
+
+    const { replyText } = await processMessage({ text: 'tiene hamburguesa', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(replyText).toContain('Hamburguesa');
+    expect(replyText).not.toBe(''); 
+  });
+
+  test('"tiene hamburguesa" sin contexto previo → NO usa contexto', async () => {
+    const id = sid();
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [mockHamburguesa] };
+      return { rows: [] };
+    });
+
+    const { decision } = await processMessage({ text: 'tiene hamburguesa', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(decision.usedContext).toBe(false);
+  });
+
+  test('"tiene hamburguesa" → contexto guarda entidad para follow-up', async () => {
+    const id = sid();
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [mockHamburguesa] };
+      return { rows: [] };
+    });
+
+    await processMessage({ text: 'tiene hamburguesa', sessionId: id, businessId: BUSINESS_ID });
+
+    const ctx = await getContext(id);
+    expect(ctx.lastEntity.value).toBe('hamburguesa');
+    expect(ctx.lastEntity.type).toBe('product');
+  });
+});
+
+// ─── extractFollowUpEntity() — bare noun (Shape 2) ───────────────────────────
+
+describe('extractFollowUpEntity() — bare noun (Shape 2)', () => {
+  test('"pizza mexicana" con lastEntity → "pizza mexicana"', () => {
+    expect(extractFollowUpEntity('pizza mexicana', { value: 'pizza', type: 'product' })).toBe('pizza mexicana');
+  });
+
+  test('"pizza bbq" con lastEntity → "pizza bbq"', () => {
+    expect(extractFollowUpEntity('pizza bbq', { value: 'pizza mexicana', type: 'product' })).toBe('pizza bbq');
+  });
+
+  test('"hamburguesa al pastor" (3 tokens) con lastEntity → extrae entidad', () => {
+    expect(extractFollowUpEntity('hamburguesa al pastor', { value: 'pizza', type: 'product' })).toBe('hamburguesa al pastor');
+  });
+
+  test('"laptop gamer pro" (3 tokens) con lastEntity → extrae entidad', () => {
+    expect(extractFollowUpEntity('laptop gamer pro', { value: 'laptop', type: 'product' })).toBe('laptop gamer pro');
+  });
+
+  test('token único "laptop" → null (requiere ≥ 2 tokens)', () => {
+    expect(extractFollowUpEntity('laptop', { value: 'plasma', type: 'product' })).toBeNull();
+  });
+
+  test('"tienen pizza" → null (verbo en BARE_SKIP)', () => {
+    expect(extractFollowUpEntity('tienen pizza mexicana', { value: 'pizza', type: 'product' })).toBeNull();
+  });
+
+  test('"hola" → null (en BARE_SKIP)', () => {
+    expect(extractFollowUpEntity('hola', { value: 'pizza', type: 'product' })).toBeNull();
+  });
+
+  test('"si" → null (1 token)', () => {
+    expect(extractFollowUpEntity('si', { value: 'pizza', type: 'product' })).toBeNull();
+  });
+
+  test('"busco hamburguesa" → null (busco está en BARE_SKIP)', () => {
+    expect(extractFollowUpEntity('busco hamburguesa', { value: 'pizza', type: 'product' })).toBeNull();
+  });
+
+  test('devuelve null sin lastEntity', () => {
+    expect(extractFollowUpEntity('pizza mexicana', null)).toBeNull();
+    expect(extractFollowUpEntity('pizza mexicana', { value: null })).toBeNull();
+  });
+});
+
+// ─── Contexto: bare-noun follow-up multi-turno ───────────────────────────────
+
+describe('Contexto: bare noun follow-up multi-turno', () => {
+  const BUSINESS_ID = 1;
+
+  const mockPizza = { id: 1, name: 'Pizza Pepperoni', description: null, price: '130.00', is_available: true, stock_quantity: 10, category: 'Pizzas' };
+  const mockMexicana = { id: 2, name: 'Pizza Mexicana', description: null, price: '145.00', is_available: true, stock_quantity: 5, category: 'Pizzas' };
+
+  test('product found → bare noun "pizza mexicana" → strategy=followup, entity actualizado', async () => {
+    const id = sid();
+
+    // Turn 1: establece contexto con "pizza"
+    db.query.mockImplementation(async (sql, params) => {
+      if (sql.includes('ILIKE') && params?.some((p) => typeof p === 'string' && p.includes('pizza'))) {
+        return { rows: [mockPizza] };
+      }
+      return { rows: [] };
+    });
+    const t1 = await processMessage({ text: 'tienen pizza', sessionId: id, businessId: BUSINESS_ID });
+    expect(t1.decision.strategy).toBe('entity');
+    expect(t1.decision.entity.value).toBe('pizza');
+
+    // Turn 2: bare noun follow-up — "pizza mexicana" sin trigger
+    db.query.mockImplementation(async (sql, params) => {
+      if (sql.includes('ILIKE') && params?.some((p) => typeof p === 'string' && p.includes('mexicana'))) {
+        return { rows: [mockMexicana] };
+      }
+      return { rows: [] };
+    });
+    const t2 = await processMessage({ text: 'pizza mexicana', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(t2.decision.strategy).toBe('followup');
+    expect(t2.decision.entity.value).toBe('pizza mexicana');
+    expect(t2.decision.usedContext).toBe(true);
+  });
+
+  test('product found → bare noun "pizza bbq" → followup, contexto actualiza entidad', async () => {
+    const id = sid();
+    const mockBbq = { ...mockPizza, id: 3, name: 'Pizza BBQ', price: '155.00' };
+
+    // Turn 1
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [mockPizza] };
+      return { rows: [] };
+    });
+    await processMessage({ text: 'tienes pizza pepperoni', sessionId: id, businessId: BUSINESS_ID });
+
+    // Turn 2
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [mockBbq] };
+      return { rows: [] };
+    });
+    const t2 = await processMessage({ text: 'pizza bbq', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(t2.decision.strategy).toBe('followup');
+    expect(t2.decision.entity.value).toBe('pizza bbq');
+
+    const ctx = await getContext(id);
+    expect(ctx.lastEntity.value).toBe('pizza bbq');
+  });
+
+  test('sin contexto: bare noun "pizza mexicana" → strategy=ai (no context = no followup)', async () => {
+    const id = sid();
+    db.query.mockResolvedValue({ rows: [] });
+
+    const { decision } = await processMessage({ text: 'pizza mexicana', sessionId: id, businessId: BUSINESS_ID });
+
+    // No hay lastEntity en contexto → not a followup → AI fallback
+    expect(decision.strategy).toBe('ai');
+    expect(decision.usedContext).toBe(false);
+  });
+
+  test('"que productos tienes" después de producto → intent=productos detectado correctamente', async () => {
+    const id = sid();
+
+    // Turn 1: establecer producto en contexto
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [mockPizza] };
+      return { rows: [] };
+    });
+    await processMessage({ text: 'tienen pizza', sessionId: id, businessId: BUSINESS_ID });
+    const ctx1 = await getContext(id);
+    expect(ctx1.lastEntity.value).toBe('pizza');
+
+    // Turn 2: "que productos tienes" — intent=productos debe detectarse
+    db.query.mockResolvedValue({ rows: [] });
+    const t2 = await processMessage({ text: 'que productos tienes', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(t2.decision.intent).toBe('productos');
+  });
+});
+
+// ─── Disponibilidad de productos ─────────────────────────────────────────────
+
+describe('Disponibilidad de productos', () => {
+  const BUSINESS_ID = 1;
+
+  const mockAvailable   = { id: 1, name: 'Pizza Pepperoni', description: null, price: '130.00', is_available: true,  stock_quantity: 10, category: 'Pizzas' };
+  const mockUnavailable = { id: 2, name: 'Pizza Mexicana',  description: null, price: '145.00', is_available: false, stock_quantity: 0,  category: 'Pizzas' };
+
+  function mockDbProduct(row) {
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [row] };
+      return { rows: [] };
+    });
+  }
+
+  // ── extractEntityCandidate para frases de disponibilidad ──────────────────
+
+  test('"esta disponible la pizza" → extrae "pizza"', () => {
+    const { extractEntityCandidate } = require('../../src/services/entityDetector');
+    expect(extractEntityCandidate('esta disponible la pizza')).toBe('pizza');
+  });
+
+  test('"hay stock de cuadernos" → extrae "cuadernos"', () => {
+    const { extractEntityCandidate } = require('../../src/services/entityDetector');
+    expect(extractEntityCandidate('hay stock de cuadernos')).toBe('cuadernos');
+  });
+
+  test('"tienen disponibilidad de la hamburguesa" → extrae "hamburguesa"', () => {
+    const { extractEntityCandidate } = require('../../src/services/entityDetector');
+    expect(extractEntityCandidate('tienen disponibilidad de la hamburguesa')).toBe('hamburguesa');
+  });
+
+  test('"hay stock de laptop gamer" → extrae "laptop gamer"', () => {
+    const { extractEntityCandidate } = require('../../src/services/entityDetector');
+    expect(extractEntityCandidate('hay stock de laptop gamer')).toBe('laptop gamer');
+  });
+
+  // ── Pipeline: producto disponible ─────────────────────────────────────────
+
+  test('producto disponible → replyText contiene ✅', async () => {
+    const id = sid();
+    mockDbProduct(mockAvailable);
+
+    const { replyText } = await processMessage({ text: '¿Tienen pizza pepperoni?', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(replyText).toContain('✅');
+    expect(replyText).toContain('Pizza Pepperoni');
+  });
+
+  test('producto NO disponible → replyText contiene ❌', async () => {
+    const id = sid();
+    mockDbProduct(mockUnavailable);
+
+    const { replyText } = await processMessage({ text: '¿Tienen pizza mexicana?', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(replyText).toContain('❌');
+    expect(replyText).toContain('Pizza Mexicana');
+  });
+
+  test('"esta disponible la pizza" → entity detectada, pipeline responde con disponibilidad', async () => {
+    const id = sid();
+    mockDbProduct(mockAvailable);
+
+    const { decision, replyText } = await processMessage({
+      text: '¿Está disponible la pizza pepperoni?',
+      sessionId: id,
+      businessId: BUSINESS_ID,
+    });
+
+    expect(decision.entity.value).toBe('pizza pepperoni');
+    expect(replyText).toContain('✅');
+  });
+
+  test('"hay stock de hamburguesa" → detecta entidad hamburguesa', async () => {
+    const id = sid();
+    const mockHamburguesa = { id: 3, name: 'Hamburguesa Doble', description: null, price: '120.00', is_available: true, stock_quantity: 5, category: 'Comida' };
+    mockDbProduct(mockHamburguesa);
+
+    const { decision } = await processMessage({
+      text: 'hay stock de hamburguesa',
+      sessionId: id,
+      businessId: BUSINESS_ID,
+    });
+
+    expect(decision.entity.value).toBe('hamburguesa');
+    expect(decision.strategy).toBe('entity');
+  });
+
+  test('stock_quantity=0 disponible=false → replyText muestra ❌ y stock 0', async () => {
+    const id = sid();
+    mockDbProduct(mockUnavailable);
+
+    const { replyText } = await processMessage({
+      text: 'tienes pizza mexicana',
+      sessionId: id,
+      businessId: BUSINESS_ID,
+    });
+
+    expect(replyText).toContain('❌');
+    expect(replyText).toContain('0');
+  });
+
+  test('consulta disponibilidad → queda en contexto para follow-up', async () => {
+    const id = sid();
+    mockDbProduct(mockAvailable);
+
+    await processMessage({ text: '¿Está disponible la pizza pepperoni?', sessionId: id, businessId: BUSINESS_ID });
+
+    const ctx = await getContext(id);
+    expect(ctx.lastEntity.type).toBe('product');
+    expect(ctx.lastEntity.value).toBe('pizza pepperoni');
+  });
+});
+
+// ─── Follow-up con triggers: "y", "tambien", "igual", "otro/a" ───────────────
+
+describe('extractFollowUpEntity() — Shape 1b: tambien/igual/otro triggers', () => {
+  test('"tambien hamburguesa bbq" → "hamburguesa bbq"', () => {
+    expect(extractFollowUpEntity('tambien hamburguesa bbq', { value: 'hamburguesa mexicana', type: 'product' })).toBe('hamburguesa bbq');
+  });
+
+  test('"igual pizza pepperoni" → "pizza pepperoni"', () => {
+    expect(extractFollowUpEntity('igual pizza pepperoni', { value: 'pizza mexicana', type: 'product' })).toBe('pizza pepperoni');
+  });
+
+  test('"otro tacos al pastor" → "tacos al pastor"', () => {
+    expect(extractFollowUpEntity('otro tacos al pastor', { value: 'tacos', type: 'product' })).toBe('tacos al pastor');
+  });
+
+  test('"otra pizza bbq" → "pizza bbq"', () => {
+    expect(extractFollowUpEntity('otra pizza bbq', { value: 'pizza mexicana', type: 'product' })).toBe('pizza bbq');
+  });
+
+  test('"tambien la pizza" → "pizza" (elimina artículo)', () => {
+    expect(extractFollowUpEntity('tambien la pizza', { value: 'hamburguesa', type: 'product' })).toBe('pizza');
+  });
+
+  test('"tb hamburguesa" → "hamburguesa"', () => {
+    expect(extractFollowUpEntity('tb hamburguesa', { value: 'pizza', type: 'product' })).toBe('hamburguesa');
+  });
+
+  test('"tambien" sin entidad → null', () => {
+    expect(extractFollowUpEntity('tambien', { value: 'pizza', type: 'product' })).toBeNull();
+  });
+
+  test('"tambien hamburguesa bbq" sin lastEntity → null', () => {
+    expect(extractFollowUpEntity('tambien hamburguesa bbq', null)).toBeNull();
+    expect(extractFollowUpEntity('tambien hamburguesa bbq', { value: null })).toBeNull();
+  });
+
+  // Ensure tambien is in BARE_SKIP so Shape 2 doesn't include it
+  test('"tambien hamburguesa" NO devuelve "tambien hamburguesa" por Shape 2', () => {
+    const result = extractFollowUpEntity('tambien hamburguesa', { value: 'pizza', type: 'product' });
+    if (result !== null) {
+      expect(result).not.toContain('tambien');
+    }
+  });
+});
+
+// ─── Flujo completo: "tienen hamburguesa mexicana" → "y hamburguesa bbq" ──────
+
+describe('Flujo completo: follow-up con "y / tambien / igual"', () => {
+  const BUSINESS_ID = 1;
+
+  const mockMexicana = { id: 1, name: 'Hamburguesa Mexicana', description: null, price: '130.00', is_available: true,  stock_quantity: 10, category: 'Comida' };
+  const mockBbq      = { id: 2, name: 'Hamburguesa BBQ',      description: null, price: '145.00', is_available: true,  stock_quantity: 5,  category: 'Comida' };
+  const mockPastor   = { id: 3, name: 'Tacos Al Pastor',      description: null, price: '80.00',  is_available: false, stock_quantity: 0,  category: 'Comida' };
+
+  test('tienen hamburguesa mexicana → y hamburguesa bbq → strategy=followup, entity=hamburguesa bbq', async () => {
+    const id = sid();
+
+    // Turn 1
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [mockMexicana] };
+      return { rows: [] };
+    });
+    const t1 = await processMessage({ text: 'tienen hamburguesa mexicana', sessionId: id, businessId: BUSINESS_ID });
+    expect(t1.decision.strategy).toBe('entity');
+    expect(t1.decision.entity.value).toBe('hamburguesa mexicana');
+
+    // Turn 2 — critico: "y hamburguesa bbq"
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [mockBbq] };
+      return { rows: [] };
+    });
+    const t2 = await processMessage({ text: 'y hamburguesa bbq', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(t2.decision.strategy).toBe('followup');
+    expect(t2.decision.entity.type).toBe('product');
+    expect(t2.decision.entity.value).toBe('hamburguesa bbq');
+    expect(t2.decision.usedContext).toBe(true);
+    expect(t2.replyText).toContain('Hamburguesa BBQ');
+  });
+
+  test('tienen hamburguesa mexicana → tambien hamburguesa bbq → followup detectado', async () => {
+    const id = sid();
+
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [mockMexicana] };
+      return { rows: [] };
+    });
+    await processMessage({ text: 'tienen hamburguesa mexicana', sessionId: id, businessId: BUSINESS_ID });
+
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [mockBbq] };
+      return { rows: [] };
+    });
+    const t2 = await processMessage({ text: 'tambien hamburguesa bbq', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(t2.decision.strategy).toBe('followup');
+    expect(t2.decision.entity.value).toBe('hamburguesa bbq');
+    expect(t2.decision.usedContext).toBe(true);
+  });
+
+  test('tienen hamburguesa mexicana → igual pizza bbq → followup detectado (otro producto)', async () => {
+    const id = sid();
+    const mockPizzaBbq = { id: 4, name: 'Pizza BBQ', description: null, price: '150.00', is_available: true, stock_quantity: 8, category: 'Pizzas' };
+
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [mockMexicana] };
+      return { rows: [] };
+    });
+    await processMessage({ text: 'tienen hamburguesa mexicana', sessionId: id, businessId: BUSINESS_ID });
+
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [mockPizzaBbq] };
+      return { rows: [] };
+    });
+    const t2 = await processMessage({ text: 'igual pizza bbq', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(t2.decision.strategy).toBe('followup');
+    expect(t2.decision.entity.value).toBe('pizza bbq');
+  });
+
+  test('follow-up hereda intent=productos del turno anterior', async () => {
+    const id = sid();
+
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [mockMexicana] };
+      return { rows: [] };
+    });
+    await processMessage({ text: 'tienen hamburguesa mexicana', sessionId: id, businessId: BUSINESS_ID });
+
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [mockBbq] };
+      return { rows: [] };
+    });
+    const t2 = await processMessage({ text: 'y hamburguesa bbq', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(t2.decision.intent).toBe('productos');
+  });
+
+  test('contexto se actualiza después del follow-up (nueva entidad en lastEntity)', async () => {
+    const id = sid();
+
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [mockMexicana] };
+      return { rows: [] };
+    });
+    await processMessage({ text: 'tienen hamburguesa mexicana', sessionId: id, businessId: BUSINESS_ID });
+
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [mockBbq] };
+      return { rows: [] };
+    });
+    await processMessage({ text: 'y hamburguesa bbq', sessionId: id, businessId: BUSINESS_ID });
+
+    const ctx = await getContext(id);
+    expect(ctx.lastEntity.value).toBe('hamburguesa bbq');
+    expect(ctx.lastEntity.type).toBe('product');
+    expect(ctx.lastIntent).toBe('productos');
+  });
+
+  test('tres turnos: mexicana → bbq → pastor', async () => {
+    const id = sid();
+
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [mockMexicana] };
+      return { rows: [] };
+    });
+    await processMessage({ text: 'tienen hamburguesa mexicana', sessionId: id, businessId: BUSINESS_ID });
+
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [mockBbq] };
+      return { rows: [] };
+    });
+    const t2 = await processMessage({ text: 'y hamburguesa bbq', sessionId: id, businessId: BUSINESS_ID });
+    expect(t2.decision.strategy).toBe('followup');
+    expect(t2.decision.entity.value).toBe('hamburguesa bbq');
+
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [mockPastor] };
+      return { rows: [] };
+    });
+    const t3 = await processMessage({ text: 'tambien tacos al pastor', sessionId: id, businessId: BUSINESS_ID });
+    expect(t3.decision.strategy).toBe('followup');
+    expect(t3.decision.entity.value).toBe('tacos al pastor');
+  });
+
+  test('detección parcialmente fallida en turno 1 — contexto persiste y follow-up funciona', async () => {
+    const id = sid();
+
+    // Manually seed context as if turn 1 partially saved entity
+    await updateContext(id, {
+      lastEntity: { type: 'product', value: 'hamburguesa' },
+      lastIntent: 'productos',
+    });
+
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [mockBbq] };
+      return { rows: [] };
+    });
+    const t2 = await processMessage({ text: 'y hamburguesa bbq', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(t2.decision.strategy).toBe('followup');
+    expect(t2.decision.entity.value).toBe('hamburguesa bbq');
+    expect(t2.decision.usedContext).toBe(true);
+  });
+});
+
+// ─── enrichFollowUpCandidate: reconstrucción con preposición ─────────────────
+
+describe('extractFollowUpEntity() — preposition-enrichment ("y de X")', () => {
+  test('"y de jamaica" + lastEntity="agua de limon" → "agua de jamaica"', () => {
+    expect(extractFollowUpEntity('y de jamaica', { value: 'agua de limon', type: 'product' })).toBe('agua de jamaica');
+  });
+
+  test('"y de fresa" + lastEntity="agua de limon" → "agua de fresa"', () => {
+    expect(extractFollowUpEntity('y de fresa', { value: 'agua de limon', type: 'product' })).toBe('agua de fresa');
+  });
+
+  test('"y de queso" + lastEntity="pizza de pepperoni" → "pizza de queso"', () => {
+    expect(extractFollowUpEntity('y de queso', { value: 'pizza de pepperoni', type: 'product' })).toBe('pizza de queso');
+  });
+
+  test('"y al carbon" + lastEntity="tacos al pastor" → "tacos al carbon"', () => {
+    expect(extractFollowUpEntity('y al carbon', { value: 'tacos al pastor', type: 'product' })).toBe('tacos al carbon');
+  });
+
+  test('"y pizza bbq" (sin preposición) → sin enriquecimiento → "pizza bbq"', () => {
+    expect(extractFollowUpEntity('y pizza bbq', { value: 'pizza mexicana', type: 'product' })).toBe('pizza bbq');
+  });
+
+  test('"tambien de jamaica" + lastEntity="agua de limon" → "agua de jamaica"', () => {
+    expect(extractFollowUpEntity('tambien de jamaica', { value: 'agua de limon', type: 'product' })).toBe('agua de jamaica');
+  });
+
+  test('"y de jamaica" + lastEntity sin preposición → sin enriquecimiento → "de jamaica"', () => {
+    // lastEntity "pizza" has no "de/con/al", so enrichment base extraction fails → returns raw candidate
+    expect(extractFollowUpEntity('y de jamaica', { value: 'pizza', type: 'product' })).toBe('de jamaica');
+  });
+});
+
+// ─── Flujo completo: producto NO encontrado → follow-up sí encontrado ────────
+
+describe('Flujo: primer resultado negativo → follow-up positivo con "y de X"', () => {
+  const BUSINESS_ID = 1;
+
+  const mockJamaica = { id: 5, name: 'Agua de Jamaica', description: null, price: '25.00', is_available: true, stock_quantity: 15, category: 'Bebidas' };
+  const mockFresa   = { id: 6, name: 'Agua de Fresa',   description: null, price: '25.00', is_available: true, stock_quantity: 8,  category: 'Bebidas' };
+
+  test('"tienen agua de limon" (no encontrado) → "y de jamaica?" → strategy=followup, entity="agua de jamaica"', async () => {
+    const id = sid();
+
+    // Turn 1: agua de limon — NOT found
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [] };
+      return { rows: [] };
+    });
+    const t1 = await processMessage({ text: 'tienen agua de limon', sessionId: id, businessId: BUSINESS_ID });
+    expect(t1.decision.strategy).toBe('entity');
+    expect(t1.decision.entity.value).toBe('agua de limon');
+    // Entity saved to context even when not found
+    const ctx1 = await getContext(id);
+    expect(ctx1.lastEntity.value).toBe('agua de limon');
+
+    // Turn 2: "y de jamaica?" — enriquece con contexto → "agua de jamaica"
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [mockJamaica] };
+      return { rows: [] };
+    });
+    const t2 = await processMessage({ text: 'y de jamaica?', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(t2.decision.strategy).toBe('followup');
+    expect(t2.decision.entity.type).toBe('product');
+    expect(t2.decision.entity.value).toBe('agua de jamaica');
+    expect(t2.decision.usedContext).toBe(true);
+    expect(t2.replyText).toContain('Jamaica');
+    // NOT the AI fallback message
+    expect(t2.replyText).not.toMatch(/🤖.*horarios.*productos.*precios/i);
+  });
+
+  test('"tienen agua de limon" (no encontrado) → contexto guarda entidad para follow-up', async () => {
+    const id = sid();
+    db.query.mockResolvedValue({ rows: [] });
+
+    await processMessage({ text: 'tienen agua de limon', sessionId: id, businessId: BUSINESS_ID });
+
+    const ctx = await getContext(id);
+    expect(ctx.lastEntity).toEqual({ type: 'product', value: 'agua de limon' });
+    expect(ctx.lastIntent).toBe('productos');
+  });
+
+  test('"y de fresa?" después de agua de limon → "agua de fresa" encontrado', async () => {
+    const id = sid();
+    db.query.mockResolvedValue({ rows: [] });
+    await processMessage({ text: 'tienen agua de limon', sessionId: id, businessId: BUSINESS_ID });
+
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [mockFresa] };
+      return { rows: [] };
+    });
+    const t2 = await processMessage({ text: 'y de fresa?', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(t2.decision.strategy).toBe('followup');
+    expect(t2.decision.entity.value).toBe('agua de fresa');
+    expect(t2.replyText).toContain('Fresa');
+  });
+
+  test('"tienen agua de limon" NO encontrado → "y de jamaica?" NO responde con IA fallback', async () => {
+    const id = sid();
+    db.query.mockResolvedValue({ rows: [] });
+    await processMessage({ text: 'tienen agua de limon', sessionId: id, businessId: BUSINESS_ID });
+
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [mockJamaica] };
+      return { rows: [] };
+    });
+    const { replyText, decision } = await processMessage({ text: 'y de jamaica?', sessionId: id, businessId: BUSINESS_ID });
+
+    // Crucial: must NOT be AI fallback
+    expect(decision.strategy).not.toBe('ai');
+    expect(replyText).not.toMatch(/Quieres saber algo mas/i);
+  });
+
+  test('tres variantes de agua: limon → jamaica → fresa (cadena seguida)', async () => {
+    const id = sid();
+    const mockLimon = { id: 4, name: 'Agua de Limon', description: null, price: '25.00', is_available: false, stock_quantity: 0, category: 'Bebidas' };
+
+    // Turn 1: limon FOUND but unavailable
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [mockLimon] };
+      return { rows: [] };
+    });
+    const t1 = await processMessage({ text: 'tienen agua de limon', sessionId: id, businessId: BUSINESS_ID });
+    expect(t1.decision.entity.value).toBe('agua de limon');
+
+    // Turn 2: y de jamaica
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [mockJamaica] };
+      return { rows: [] };
+    });
+    const t2 = await processMessage({ text: 'y de jamaica', sessionId: id, businessId: BUSINESS_ID });
+    expect(t2.decision.strategy).toBe('followup');
+    expect(t2.decision.entity.value).toBe('agua de jamaica');
+
+    // Turn 3: y de fresa
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [mockFresa] };
+      return { rows: [] };
+    });
+    const t3 = await processMessage({ text: 'y de fresa', sessionId: id, businessId: BUSINESS_ID });
+    expect(t3.decision.strategy).toBe('followup');
+    expect(t3.decision.entity.value).toBe('agua de fresa');
+  });
+});
+
+// ─── Intención: descripcion ───────────────────────────────────────────────────
+
+describe('Intención: descripcion', () => {
+  const BUSINESS_ID = 1;
+
+  const mockPizza = {
+    id: 1,
+    name: 'Pizza Pepperoni',
+    description: 'Masa crujiente, salsa de tomate, pepperoni y queso mozzarella',
+    price: '130.00',
+    is_available: true,
+    stock_quantity: 10,
+    category: 'Pizzas',
+  };
+  const mockSinDesc = {
+    id: 2,
+    name: 'Agua de Jamaica',
+    description: null,
+    price: '25.00',
+    is_available: true,
+    stock_quantity: 20,
+    category: 'Bebidas',
+  };
+
+  function mockDbProduct(row) {
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [row] };
+      return { rows: [] };
+    });
+  }
+
+  // ── Detección de intención ────────────────────────────────────────────────
+
+  test('"que tiene la pizza pepperoni" → intent=descripcion', async () => {
+    const id = sid();
+    mockDbProduct(mockPizza);
+    const { decision } = await processMessage({ text: 'que tiene la pizza pepperoni', sessionId: id, businessId: BUSINESS_ID });
+    expect(decision.intent).toBe('descripcion');
+  });
+
+  test('"que contiene este articulo" → intent=descripcion', async () => {
+    const id = sid();
+    db.query.mockResolvedValue({ rows: [] });
+    const { decision } = await processMessage({ text: 'que contiene este articulo', sessionId: id, businessId: BUSINESS_ID });
+    expect(decision.intent).toBe('descripcion');
+  });
+
+  test('"caracteristicas" → intent=descripcion', async () => {
+    const id = sid();
+    db.query.mockResolvedValue({ rows: [] });
+    const { decision } = await processMessage({ text: 'caracteristicas', sessionId: id, businessId: BUSINESS_ID });
+    expect(decision.intent).toBe('descripcion');
+  });
+
+  test('"especificaciones de pizza pepperoni" → intent=descripcion', async () => {
+    const id = sid();
+    mockDbProduct(mockPizza);
+    const { decision } = await processMessage({ text: 'especificaciones de pizza pepperoni', sessionId: id, businessId: BUSINESS_ID });
+    expect(decision.intent).toBe('descripcion');
+  });
+
+  test('"que trae" → intent=descripcion', async () => {
+    const id = sid();
+    db.query.mockResolvedValue({ rows: [] });
+    const { decision } = await processMessage({ text: 'que trae', sessionId: id, businessId: BUSINESS_ID });
+    expect(decision.intent).toBe('descripcion');
+  });
+
+  test('"descripcion de este articulo" → intent=descripcion', async () => {
+    const id = sid();
+    db.query.mockResolvedValue({ rows: [] });
+    const { decision } = await processMessage({ text: 'descripcion de este articulo', sessionId: id, businessId: BUSINESS_ID });
+    expect(decision.intent).toBe('descripcion');
+  });
+
+  // ── Respuesta con descripción ─────────────────────────────────────────────
+
+  test('"que tiene la pizza pepperoni" → replyText contiene descripción', async () => {
+    const id = sid();
+    mockDbProduct(mockPizza);
+    const { replyText } = await processMessage({ text: 'que tiene la pizza pepperoni', sessionId: id, businessId: BUSINESS_ID });
+    expect(replyText).toContain('Pizza Pepperoni');
+    expect(replyText).toContain('pepperoni');
+  });
+
+  test('producto sin descripción → respuesta informativa sin crash', async () => {
+    const id = sid();
+    mockDbProduct(mockSinDesc);
+    const { replyText } = await processMessage({ text: 'que contiene agua de jamaica', sessionId: id, businessId: BUSINESS_ID });
+    expect(replyText).toContain('Agua de Jamaica');
+    expect(replyText).toBeDefined();
+  });
+
+  test('entidad no encontrada → respuesta informativa', async () => {
+    const id = sid();
+    db.query.mockResolvedValue({ rows: [] });
+    const { replyText } = await processMessage({ text: 'que contiene el producto xyz123', sessionId: id, businessId: BUSINESS_ID });
+    expect(typeof replyText).toBe('string');
+    expect(replyText.length).toBeGreaterThan(0);
+  });
+
+  // ── Diferenciación "tiene X" vs "que tiene X" ─────────────────────────────
+
+  test('"tiene hamburguesa" → disponibilidad (NO descripcion)', async () => {
+    const id = sid();
+    mockDbProduct(mockPizza);
+    const { decision } = await processMessage({ text: 'tiene hamburguesa', sessionId: id, businessId: BUSINESS_ID });
+    expect(decision.intent).not.toBe('descripcion');
+  });
+
+  test('"tienes pizza" → disponibilidad (NO descripcion)', async () => {
+    const id = sid();
+    mockDbProduct(mockPizza);
+    const { decision } = await processMessage({ text: 'tienes pizza', sessionId: id, businessId: BUSINESS_ID });
+    expect(decision.intent).not.toBe('descripcion');
+  });
+
+  test('"que tienes" → productos (NO descripcion)', async () => {
+    const id = sid();
+    db.query.mockResolvedValue({ rows: [] });
+    const { decision } = await processMessage({ text: 'que tienes', sessionId: id, businessId: BUSINESS_ID });
+    expect(decision.intent).toBe('productos');
+    expect(decision.intent).not.toBe('descripcion');
+  });
+
+  // ── Uso de contexto ───────────────────────────────────────────────────────
+
+  test('"que contiene este articulo" con contexto pizza → usa contexto', async () => {
+    const id = sid();
+
+    // Turn 1: establish pizza context
+    mockDbProduct(mockPizza);
+    await processMessage({ text: 'tienes pizza pepperoni', sessionId: id, businessId: BUSINESS_ID });
+
+    // Turn 2: ambiguous description request → context entity used
+    mockDbProduct(mockPizza);
+    const { decision } = await processMessage({ text: 'que contiene este articulo', sessionId: id, businessId: BUSINESS_ID });
+    expect(decision.intent).toBe('descripcion');
+    expect(decision.usedContext).toBe(true);
+  });
+
+  test('"que incluye" sin entidad ni contexto → pide clarificación', async () => {
+    const id = sid();
+    db.query.mockResolvedValue({ rows: [] });
+    const { replyText } = await processMessage({ text: 'que incluye', sessionId: id, businessId: BUSINESS_ID });
+    // No entity and no context → should ask for clarification, not crash
+    expect(typeof replyText).toBe('string');
+    expect(replyText.length).toBeGreaterThan(0);
+  });
+});
+
+// ─── Estructura "que [entidad] tienen?" ──────────────────────────────────────
+
+describe('Estructura: que + [entidad] + tienen', () => {
+  const BUSINESS_ID = 1;
+
+  const { extractEntityCandidate } = require('../../src/services/entityDetector');
+
+  // ── extractEntityCandidate ────────────────────────────────────────────────
+
+  test('"que hamburguesas tienen" → extrae "hamburguesas"', () => {
+    expect(extractEntityCandidate('que hamburguesas tienen')).toBe('hamburguesas');
+  });
+
+  test('"que tacos al pastor tienen" → extrae "tacos al pastor"', () => {
+    expect(extractEntityCandidate('que tacos al pastor tienen')).toBe('tacos al pastor');
+  });
+
+  test('"que hamburguesas hay" → extrae "hamburguesas"', () => {
+    expect(extractEntityCandidate('que hamburguesas hay')).toBe('hamburguesas');
+  });
+
+  test('"que hamburguesas tienen?" (con signo) → extrae "hamburguesas"', () => {
+    expect(extractEntityCandidate('que hamburguesas tienen?')).toBe('hamburguesas');
+  });
+
+  test('"que hamburguesas tienen disponibles" → extrae "hamburguesas"', () => {
+    expect(extractEntityCandidate('que hamburguesas tienen disponibles')).toBe('hamburguesas');
+  });
+
+  test('"que productos tienen" → null (producto es genérico, está en blocklist)', () => {
+    // "productos" está en ENTITY_BLOCKLIST → debe rechazarse
+    expect(extractEntityCandidate('que productos tienen')).toBeNull();
+  });
+
+  test('"que tiene la hamburguesa" NO es extraído por este patrón (verb-first → descripcion)', () => {
+    // El patrón requiere verbo AL FINAL. Este tiene verbo justo tras "que" → no aplica.
+    // La extracción puede devolverlo por otro patrón (descripcion), pero no por el nuevo.
+    // Solo verificamos que no devuelve "tiene la hamburguesa".
+    const result = extractEntityCandidate('que tiene la hamburguesa');
+    if (result !== null) {
+      expect(result).not.toBe('tiene la hamburguesa');
+      expect(result).not.toContain('tiene');
+    }
+  });
+
+  // ── Pipeline integración ─────────────────────────────────────────────────
+
+  test('"que hamburguesas tienen" → strategy=entity, intent=productos', async () => {
+    const id = sid();
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [
+        { id: 1, name: 'Hamburguesa Doble', description: null, price: '130.00', is_available: true, stock_quantity: 5, category: 'Comida' },
+      ]};
+      return { rows: [] };
+    });
+
+    const { decision } = await processMessage({ text: 'que hamburguesas tienen', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(decision.strategy).toBe('entity');
+    expect(decision.intent).toBe('productos');
+    expect(decision.entity.value).toBe('hamburguesas');
+    expect(decision.intent).not.toBe('descripcion');
+  });
+
+  test('"que tacos al pastor tienen?" → extrae entidad multi-palabra', async () => {
+    const id = sid();
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [
+        { id: 2, name: 'Tacos al Pastor', description: null, price: '80.00', is_available: true, stock_quantity: 10, category: 'Tacos' },
+      ]};
+      return { rows: [] };
+    });
+
+    const { decision } = await processMessage({ text: 'que tacos al pastor tienen?', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(decision.strategy).toBe('entity');
+    expect(decision.entity.value).toBe('tacos al pastor');
+    expect(decision.intent).toBe('productos');
+  });
+
+  test('"que hamburguesas tienen" → replyText contiene el nombre del producto', async () => {
+    const id = sid();
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [
+        { id: 1, name: 'Hamburguesa BBQ', description: null, price: '145.00', is_available: true, stock_quantity: 3, category: 'Comida' },
+      ]};
+      return { rows: [] };
+    });
+
+    const { replyText } = await processMessage({ text: 'que hamburguesas tienen', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(replyText).toContain('Hamburguesa BBQ');
+  });
+
+  test('"que hamburguesas tienen" y "que tiene la hamburguesa bbq" difieren en intent', async () => {
+    // "que hamburguesas tienen" → productos
+    expect(detectIntent('que hamburguesas tienen').intent).not.toBe('descripcion');
+    // "que tiene la hamburguesa bbq" → descripcion
+    expect(detectIntent('que tiene la hamburguesa bbq').intent).toBe('descripcion');
+  });
+});
+
+// ─── Estructura "que [intent-word] tienen?" → infiere intent correcto ────────
+
+describe('Estructura: que [intent-word] tienen → infiere intent correcto', () => {
+  const BUSINESS_ID = 1;
+
+  // ── Intent detection solo ─────────────────────────────────────────────────
+
+  test('"que horarios tienen?" → intent=horarios (NO productos)', () => {
+    expect(detectIntent('que horarios tienen?').intent).toBe('horarios');
+    expect(detectIntent('que horarios tienen?').intent).not.toBe('productos');
+  });
+
+  test('"que promociones tienen?" → intent=promociones', () => {
+    expect(detectIntent('que promociones tienen?').intent).toBe('promociones');
+  });
+
+  test('"que descuentos tienen?" → intent=promociones', () => {
+    expect(detectIntent('que descuentos tienen?').intent).toBe('promociones');
+  });
+
+  test('"que precios tienen?" → intent=precios', () => {
+    expect(detectIntent('que precios tienen?').intent).toBe('precios');
+  });
+
+  test('"que ubicacion tienen?" → intent=ubicacion', () => {
+    expect(detectIntent('que ubicacion tienen?').intent).toBe('ubicacion');
+  });
+
+  // ── Blocklist: palabras de intención no extraídas como entidad ────────────
+
+  test('"que horarios tienen" NO extrae "horarios" como entidad producto', () => {
+    const { extractEntityCandidate } = require('../../src/services/entityDetector');
+    expect(extractEntityCandidate('que horarios tienen')).toBeNull();
+  });
+
+  test('"que precios tienen" NO extrae "precios" como entidad producto', () => {
+    const { extractEntityCandidate } = require('../../src/services/entityDetector');
+    expect(extractEntityCandidate('que precios tienen')).toBeNull();
+  });
+
+  test('"que ubicacion tienen" NO extrae "ubicacion" como entidad producto', () => {
+    const { extractEntityCandidate } = require('../../src/services/entityDetector');
+    expect(extractEntityCandidate('que ubicacion tienen')).toBeNull();
+  });
+
+  // ── Pipeline: routing correcto ────────────────────────────────────────────
+
+  test('"que horarios tienen?" → pipeline: decision.intent=horarios, strategy≠entity', async () => {
+    const id = sid();
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('business_hours')) return { rows: [
+        { day_of_week: 1, open_time: '09:00:00', close_time: '18:00:00', is_closed: false },
+      ]};
+      return { rows: [] };
+    });
+
+    const { decision } = await processMessage({ text: 'que horarios tienen?', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(decision.intent).toBe('horarios');
+    // Must NOT be routed as a product entity query
+    expect(decision.strategy).not.toBe('entity');
+    expect(decision.entity.value).toBeNull();
+  });
+
+  test('"que promociones tienen?" → pipeline: decision.intent=promociones', async () => {
+    const id = sid();
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('promotions')) return { rows: [
+        { title: 'Promo 2x1', description: '', discount_type: 'percentage', discount_value: 50, start_date: '2026-01-01', end_date: '2026-12-31' },
+      ]};
+      return { rows: [] };
+    });
+
+    const { decision } = await processMessage({ text: 'que promociones tienen?', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(decision.intent).toBe('promociones');
+    expect(decision.entity.value).toBeNull();
+  });
+
+  test('"que precios tienen?" → pipeline: decision.intent=precios', async () => {
+    const id = sid();
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('FROM products') && !sql.includes('ILIKE')) return { rows: [
+        { name: 'Hamburguesa', price: '130.00' },
+      ]};
+      return { rows: [] };
+    });
+
+    const { decision } = await processMessage({ text: 'que precios tienen?', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(decision.intent).toBe('precios');
+    expect(decision.entity.value).toBeNull();
+  });
+
+  // ── "que hamburguesas tienen" sigue siendo productos (entidad concreta) ───
+
+  test('"que hamburguesas tienen" → entity=hamburguesas, intent=productos (sin cambio)', async () => {
+    const id = sid();
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [
+        { id: 1, name: 'Hamburguesa Doble', description: null, price: '130.00', is_available: true, stock_quantity: 5, category: 'Comida' },
+      ]};
+      return { rows: [] };
+    });
+
+    const { decision } = await processMessage({ text: 'que hamburguesas tienen', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(decision.entity.value).toBe('hamburguesas');
+    expect(decision.intent).toBe('productos');
+  });
+});
+
+
+
 

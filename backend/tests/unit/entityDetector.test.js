@@ -52,6 +52,19 @@ describe('extractEntityCandidate()', () => {
       ['quiero una hamburguesa',            'hamburguesa'],
       ['me interesa el mole poblano',       'mole poblano'],
       ['info de la pizza margarita',        'pizza margarita'],
+      // verifacación de disponibilidad en stock
+      ['esta disponible la pizza',             'pizza'],
+      ['estan disponibles las hamburguesas',   'hamburguesas'],
+      ['hay stock de cuadernos',               'cuadernos'],
+      ['hay stock de laptop gamer',            'laptop gamer'],
+      ['tienes disponibilidad de agua mineral','agua mineral'],
+      ['tienen disponibilidad de la birria',   'birria'],
+      // verbo "tiene" (singular tercera persona) — casos del bug crítico
+      ['tiene hamburguesa',                    'hamburguesa'],
+      ['tiene hamburguesa bbq',                'hamburguesa bbq'],
+      ['tiene la hamburguesa mexicana',        'hamburguesa mexicana'],
+      ['tienen hamburguesas',                  'hamburguesas'],
+      ['tienes pizza mexicana',                'pizza mexicana'],
       // verbs: vende/vendes/venden
       ['vendes agua de horchata',           'agua de horchata'],
       ['venden laptops',                    'laptops'],

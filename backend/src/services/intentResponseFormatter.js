@@ -117,4 +117,24 @@ function formatHorarioDay(normalizedDayKey, row) {
   return `El ${display} abrimos de ${formatTime(row.open_time)} a ${formatTime(row.close_time)}. 🕐`;
 }
 
-module.exports = { formatIntentResponse, formatHorarioDay, formatList };
+/**
+ * Formats a product description response, putting the description first.
+ * Unlike formatProductResponse which leads with price/availability.
+ *
+ * @param {string} entityValue  Queried entity name (raw user input)
+ * @param {Array}  rows         Product rows from queryProducts
+ * @returns {string}
+ */
+function formatDescripcionResponse(entityValue, rows) {
+  if (!rows || rows.length === 0) {
+    return `No encontré información sobre "*${entityValue}*". ¿Quieres ver el catálogo completo?`;
+  }
+  const p = rows[0];
+  const name = p.name ?? entityValue;
+  if (!p.description) {
+    return `*${name}*: sin descripción detallada disponible.`;
+  }
+  return `*${name}*: ${p.description}`;
+}
+
+module.exports = { formatIntentResponse, formatHorarioDay, formatList, formatDescripcionResponse };
