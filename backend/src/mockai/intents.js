@@ -52,9 +52,15 @@ const intents = {
       { phrase: 'atienden fines de semana', weight: 2 },
       { phrase: 'abren manana', weight: 2 },
       { phrase: 'abren hoy', weight: 2 },
+      { phrase: 'abren toda la semana', weight: 3 },
+      { phrase: 'abren todos los dias', weight: 3 },
+      { phrase: 'atienden toda la semana', weight: 3 },
+      { phrase: 'toda la semana', weight: 2 },
+      { phrase: 'fines de semana', weight: 2 },
       // Palabras sueltas (weight 1)
       { phrase: 'horarios', weight: 1 },
       { phrase: 'horario', weight: 1 },
+      { phrase: 'abren', weight: 1 },
     ],
   },
 

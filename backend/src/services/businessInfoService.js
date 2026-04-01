@@ -38,4 +38,51 @@ async function getBusinessInfoByIntent(intentName, businessId) {
   return queryFn(businessId);
 }
 
-module.exports = { getBusinessInfoByIntent };
+/**
+ * Fetches the schedule for a specific day of the week.
+ * @param {number} businessId
+ * @param {number} dayOfWeek  0=Sunday … 6=Saturday
+ * @returns {Promise<object|null>}
+ */
+async function getHorariosByDay(businessId, dayOfWeek) {
+  return BusinessModel.getHorariosByDay(businessId, dayOfWeek);
+}
+
+/**
+ * Returns distinct category names for a business.
+ * @param {number} businessId
+ * @returns {Promise<string[]>}
+ */
+async function getCategories(businessId) {
+  return BusinessModel.getCategories(businessId);
+}
+
+/**
+ * Returns paginated products for a given category.
+ * @param {number} businessId
+ * @param {string} categoryName
+ * @param {number} limit
+ * @param {number} offset
+ * @returns {Promise<object[]>}
+ */
+async function getProductosByCategory(businessId, categoryName, limit = 15, offset = 0) {
+  return BusinessModel.getProductosByCategory(businessId, categoryName, limit, offset);
+}
+
+/**
+ * Counts products in a given category.
+ * @param {number} businessId
+ * @param {string} categoryName
+ * @returns {Promise<number>}
+ */
+async function countProductosByCategory(businessId, categoryName) {
+  return BusinessModel.countProductosByCategory(businessId, categoryName);
+}
+
+module.exports = {
+  getBusinessInfoByIntent,
+  getHorariosByDay,
+  getCategories,
+  getProductosByCategory,
+  countProductosByCategory,
+};

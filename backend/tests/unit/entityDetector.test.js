@@ -61,6 +61,15 @@ describe('extractEntityCandidate()', () => {
       ['ofrece la laptop gamer',            'laptop gamer'],
       // verb: necesito
       ['necesito un cuaderno',              'cuaderno'],
+      // precio [product] — bare price query (no "de")
+      ['precio hamburguesa',                'hamburguesa'],
+      ['precio agua de horchata',           'agua de horchata'],
+      ['precio pozole rojo',                'pozole rojo'],
+      // que precio tiene [product]
+      ['que precio tiene la hamburguesa',   'hamburguesa'],
+      ['que precio tiene el pozole',        'pozole'],
+      // cual es el precio de [product]
+      ['cual es el precio de la pizza',     'pizza'],
     ];
 
     test.each(CASES)('"%s" → "%s"', (input, expected) => {

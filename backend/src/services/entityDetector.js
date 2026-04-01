@@ -76,6 +76,8 @@ const PRODUCT_TRIGGER_WORDS = new Set([
   'informacion', 'info', 'detalle', 'detalles',
   'vende', 'vendes', 'venden',
   'ofrece', 'ofrecen', 'necesito',
+  // Price-query trigger words
+  'precio', 'precios', 'cuesta', 'cuanto', 'vale', 'cobran', 'costo',
 ]);
 
 function hasProductTrigger(normalizedText) {
@@ -88,6 +90,10 @@ const PRODUCT_QUERY_PATTERNS = [
   /tienen\s+disponible\s+(?<entity>[\w\s]+?)(?:\?|$)/,
   /hay\s+disponibilidad\s+de\s+(?<entity>[\w\s]+?)(?:\?|$)/,
   /cu[ae]nto\s+(?:cuesta|vale|sale|cobran\s+por)\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
+  // "que precio tiene la hamburguesa" / "cual es el precio de la pizza"
+  /(?:que\s+|cual\s+es\s+(?:el\s+)?)?precio\s+(?:tiene[n]?|cuesta|cobran|vale|sale)\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
+  // "precio hamburguesa" / "precio agua de horchata" (bare price query, starts with "precio")
+  /^precio\s+(?:de\s+)?(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
   /precio\s+de\s+(?:el\s+|la\s+|los\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
   /me\s+(?:pueden\s+dar|das?|traes?)\s+(?:el\s+|la\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
   /tienen\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
@@ -298,21 +304,24 @@ function formatProductResponse(entity, products) {
   if (products.length === 1) {
     const p = products[0];
     const status = p.is_available ? '✅ Disponible' : '❌ No disponible';
-    const stock  = p.stock_quantity != null ? ` | Stock: ${p.stock_quantity} uds.` : '';
-    const desc   = p.description ? `\n  ${p.description}` : '';
+    const stock  = p.stock_quantity != null ? `\n  📦 Stock: ${p.stock_quantity} uds.` : '';
+    const cat    = p.category ? `\n  🏷️ Categoría: ${p.category}` : '';
+    const desc   = p.description ? `\n  📝 ${p.description}` : '';
     return (
       `🔍 *${p.name}*\n` +
-      `  Precio: $${Number(p.price).toFixed(2)}\n` +
-      `  Estado: ${status}${stock}` +
-      desc
+      `  💲 Precio: $${Number(p.price).toFixed(2)}\n` +
+      `  ${status}` +
+      stock + cat + desc
     );
   }
 
   const lines = products.map((p) => {
     const status = p.is_available ? '✅' : '❌';
-    return `  ${status} ${p.name} — $${Number(p.price).toFixed(2)}`;
+    const stock  = p.stock_quantity != null ? ` · stock: ${p.stock_quantity}` : '';
+    const cat    = p.category ? ` [${p.category}]` : '';
+    return `  • ${status} *${p.name}*${cat}\n      💲 $${Number(p.price).toFixed(2)}${stock}`;
   });
-  return `🔍 Encontré ${products.length} resultados para "*${entity}*":\n${lines.join('\n')}`;
+  return `🔍 Encontré *${products.length} resultados* para "${entity}":\n\n${lines.join('\n\n')}`;
 }
 
 /**
@@ -327,9 +336,10 @@ function formatCategoryResponse(categoryName, rows) {
   }
   const lines = rows.map((p) => {
     const status = p.is_available ? '✅' : '❌';
-    return `  ${status} ${p.name} — $${Number(p.price).toFixed(2)}`;
+    const stock  = p.stock_quantity != null ? ` · stock: ${p.stock_quantity}` : '';
+    return `  • ${status} *${p.name}* — $${Number(p.price).toFixed(2)}${stock}`;
   });
-  return `📂 Productos en *${categoryName}*:\n${lines.join('\n')}`;
+  return `📂 *Categoría: ${categoryName}*\n\n${lines.join('\n')}`;
 }
 
 module.exports = {

@@ -4,7 +4,7 @@ const Message = ({ message, currentUser }) => {
   return (
     <div className={`message ${isMine ? 'message--mine' : 'message--theirs'}`}>
       {!isMine && <span className="message__sender">{message.sender}</span>}
-      <p className="message__text">{message.text}</p>
+      <p className="message__text" style={{ whiteSpace: 'pre-wrap' }}>{message.text}</p>
       <span className="message__time">
         {new Date(message.createdAt).toLocaleTimeString([], {
           hour: '2-digit',

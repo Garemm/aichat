@@ -526,3 +526,429 @@ describe('Product not found → "sí" shows catalog', () => {
     expect(ctx.lastIntent).toBeNull();
   });
 });
+
+// ─── Precio con cambio de producto ─────────────────────────────────────────────
+
+describe('Precio: detección de producto en mensaje vs contexto', () => {
+  const BUSINESS_ID = 1;
+
+  const mockHamburguesa = { id: 1, name: 'Hamburguesa', description: null, price: '150.00', is_available: true, stock_quantity: 5, category: 'Comida' };
+  const mockHorchata  = { id: 2, name: 'Agua de Horchata', description: null, price: '35.00', is_available: true, stock_quantity: 20, category: 'Bebidas' };
+
+  function mockDbByName(rows) {
+    db.query.mockImplementation(async (sql, params) => {
+      if (!sql.includes('ILIKE')) return { rows: [] };
+      const search = params?.find((p) => typeof p === 'string' && p.startsWith('%'))?.replace(/%/g, '').toLowerCase() ?? '';
+      const match = rows.filter((r) => r.name.toLowerCase().includes(search));
+      return { rows: match };
+    });
+  }
+
+  test('"precio hamburguesa" → detecta hamburguesa, NO usa contexto', async () => {
+    const id = sid();
+    mockDbByName([mockHamburguesa, mockHorchata]);
+
+    const { decision, replyText } = await processMessage({ text: 'precio hamburguesa', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(decision.entity.value).toBe('hamburguesa');
+    expect(decision.usedContext).toBe(false);
+    expect(replyText).toContain('Hamburguesa');
+    expect(replyText).toContain('150.00');
+  });
+
+  test('"precio agua de horchata" después de preguntar hamburguesa → NO usa contexto', async () => {
+    const id = sid();
+
+    // Turn 1: hamburgesa quedó en contexto
+    mockDbByName([mockHamburguesa]);
+    await processMessage({ text: 'precio hamburguesa', sessionId: id, businessId: BUSINESS_ID });
+
+    // Turn 2: precio agua de horchata → debe usar agua de horchata, NO hamburguesa
+    mockDbByName([mockHamburguesa, mockHorchata]);
+    const { decision, replyText } = await processMessage({ text: 'precio agua de horchata', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(decision.entity.value).toBe('agua de horchata');
+    expect(decision.usedContext).toBe(false);
+    expect(replyText).toContain('Agua de Horchata');
+    expect(replyText).toContain('35.00');
+    expect(replyText).not.toContain('Hamburguesa');
+  });
+
+  test('"y cuanto cuesta?" → usa contexto (hamburguesa)', async () => {
+    const id = sid();
+
+    // Turn 1: establecer contexto con hamburguesa
+    mockDbByName([mockHamburguesa]);
+    await processMessage({ text: 'precio hamburguesa', sessionId: id, businessId: BUSINESS_ID });
+
+    // Turn 2: pregunta ambigua → debe usar contexto
+    mockDbByName([mockHamburguesa]);
+    const { decision } = await processMessage({ text: '¿y cuánto cuesta?', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(decision.usedContext).toBe(true);
+    expect(decision.entity.value).toBe('hamburguesa');
+  });
+
+  test('"que precio tiene la hamburguesa" → extrae hamburguesa del mensaje', async () => {
+    const id = sid();
+    mockDbByName([mockHamburguesa]);
+
+    const { decision, replyText } = await processMessage({ text: '¿Qué precio tiene la hamburguesa?', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(decision.entity.value).toBe('hamburguesa');
+    expect(replyText).toContain('Hamburguesa');
+    expect(replyText).toContain('150.00');
+  });
+});
+
+// ─── Horarios con día específico ──────────────────────────────────────────────
+
+describe('Horarios: detección de día en el mensaje', () => {
+  const BUSINESS_ID = 1;
+
+  const mockLunes  = { day_of_week: 1, open_time: '09:00:00', close_time: '18:00:00', is_closed: false };
+  const mockMartes = { day_of_week: 2, open_time: '10:00:00', close_time: '20:00:00', is_closed: false };
+  const mockDomingo = { day_of_week: 0, open_time: null, close_time: null, is_closed: true };
+
+  function mockDbHorarios(row) {
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('business_hours')) return { rows: row ? [row] : [] };
+      return { rows: [] };
+    });
+  }
+
+  test('"cuando abren" → intent=horarios, entity=null (responde todos los días)', async () => {
+    const id = sid();
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('business_hours')) return { rows: [mockLunes, mockMartes] };
+      return { rows: [] };
+    });
+    const { decision } = await processMessage({ text: 'cuando abren', sessionId: id, businessId: BUSINESS_ID });
+    expect(decision.intent).toBe('horarios');
+    expect(decision.entity.type).toBeNull();
+    expect(decision.usedContext).toBe(false);
+  });
+
+  test('"abren el lunes" → day=lunes, intent=horarios, NO IA, NO contexto', async () => {
+    const id = sid();
+    mockDbHorarios(mockLunes);
+
+    const { decision, replyText } = await processMessage({ text: 'abren el lunes', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(decision.strategy).toBe('entity');
+    expect(decision.intent).toBe('horarios');
+    expect(decision.entity.type).toBe('day');
+    expect(decision.entity.value).toBe('lunes');
+    expect(decision.usedContext).toBe(false);
+    expect(replyText).toContain('Lunes');
+    expect(replyText).toContain('9:00 am');
+  });
+
+  test('"lunes?" → detecta lunes, responde horarios del lunes', async () => {
+    const id = sid();
+    mockDbHorarios(mockLunes);
+
+    const { decision, replyText } = await processMessage({ text: 'lunes', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(decision.entity.type).toBe('day');
+    expect(decision.entity.value).toBe('lunes');
+    expect(decision.intent).toBe('horarios');
+    expect(replyText).toContain('Lunes');
+  });
+
+  test('"y el martes?" → detecta martes directamente (no necesita contexto)', async () => {
+    const id = sid();
+    mockDbHorarios(mockMartes);
+
+    const { decision, replyText } = await processMessage({ text: '¿y el martes?', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(decision.entity.type).toBe('day');
+    expect(decision.entity.value).toBe('martes');
+    expect(decision.intent).toBe('horarios');
+    expect(decision.usedContext).toBe(false);
+    expect(replyText).toContain('Martes');
+  });
+
+  test('día cerrado → respuesta "estamos cerrados"', async () => {
+    const id = sid();
+    mockDbHorarios(mockDomingo);
+
+    const { replyText } = await processMessage({ text: 'abren el domingo', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(replyText.toLowerCase()).toContain('cerrado');
+  });
+
+  test('día no encontrado en DB → respuesta de fallback', async () => {
+    const id = sid();
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('business_hours')) return { rows: [] };
+      return { rows: [] };
+    });
+
+    const { replyText } = await processMessage({ text: 'el sabado abren', sessionId: id, businessId: BUSINESS_ID });
+    expect(replyText.toLowerCase()).toContain('no encontré');
+  });
+
+  test('day entity se guarda en contexto después de consulta', async () => {
+    const id = sid();
+    mockDbHorarios(mockLunes);
+
+    await processMessage({ text: 'abren el lunes', sessionId: id, businessId: BUSINESS_ID });
+
+    const ctx = await getContext(id);
+    expect(ctx.lastIntent).toBe('horarios');
+    expect(ctx.lastEntity.type).toBe('day');
+    expect(ctx.lastEntity.value).toBe('lunes');
+  });
+
+  test('cambio de día → SIEMPRE usa el día del mensaje, no el contexto', async () => {
+    const id = sid();
+
+    // Turn 1: preguntar lunes
+    mockDbHorarios(mockLunes);
+    await processMessage({ text: 'abren el lunes', sessionId: id, businessId: BUSINESS_ID });
+
+    // Turn 2: preguntar martes → DEBE responder martes, no lunes
+    mockDbHorarios(mockMartes);
+    const t2 = await processMessage({ text: 'y el martes', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(t2.decision.entity.value).toBe('martes');
+    expect(t2.decision.usedContext).toBe(false);
+    expect(t2.replyText).toContain('Martes');
+    expect(t2.replyText).not.toContain('Lunes');
+  });
+
+  test('decide() con day entity → strategy=entity, intent=horarios, usedContext=false', () => {
+    const dayEntityResult = { type: 'day', value: 'viernes', dayOfWeek: 5 };
+    const anyContext = { lastIntent: 'precios', lastEntity: { type: 'product', value: 'pizza' } };
+
+    const d = decide(
+      { intent: null, score: 0, scores: {}, confident: false },
+      dayEntityResult,
+      anyContext,
+      'viernes'
+    );
+
+    expect(d.strategy).toBe('entity');
+    expect(d.intent).toBe('horarios');
+    expect(d.entity.type).toBe('day');
+    expect(d.entity.value).toBe('viernes');
+    expect(d.entity.dayOfWeek).toBe(5);
+    expect(d.usedContext).toBe(false);
+  });
+
+  test('decide() con day entity ignora cualquier contexto previo de producto', () => {
+    const dayEntityResult = { type: 'day', value: 'lunes', dayOfWeek: 1 };
+    const productContext = { lastIntent: 'precios', lastEntity: { type: 'product', value: 'hamburguesa' } };
+
+    const d = decide(
+      { intent: 'horarios', score: 2, scores: { horarios: 2 }, confident: true },
+      dayEntityResult,
+      productContext,
+      'abren el lunes'
+    );
+
+    expect(d.intent).toBe('horarios');
+    expect(d.entity.type).toBe('day');
+    expect(d.usedContext).toBe(false);
+  });
+});
+
+// ─── Paginación y selección de categoría ─────────────────────────────────────
+
+describe('Paginación: catálogo grande → categorías → paginación', () => {
+  const BUSINESS_ID = 1;
+
+  // Generate N fake products
+  function makeProducts(n, category = 'General') {
+    return Array.from({ length: n }, (_, i) => ({
+      id: i + 1,
+      name: `Producto ${i + 1}`,
+      description: null,
+      price: String((10 + i).toFixed(2)),
+      is_available: true,
+      stock_quantity: 5,
+      category,
+    }));
+  }
+
+  const CATEGORIES = ['Electrónica', 'Accesorios', 'Bebidas'];
+
+  // Mock db.query dispatch table for pagination scenario
+  function mockDbPagination({ allProducts, categoriesRows, categoryProducts, countResult }) {
+    db.query.mockImplementation(async (sql, params) => {
+      // getProductosByCategory (LIMIT / OFFSET) — must be checked BEFORE generic ILIKE
+      if (sql.includes('LIMIT') && sql.includes('OFFSET')) {
+        const limit  = params?.[2] ?? 10;
+        const offset = params?.[3] ?? 0;
+        const src    = categoryProducts ?? [];
+        return { rows: src.slice(offset, offset + limit) };
+      }
+
+      // countProductosByCategory
+      if (sql.includes('COUNT(*)')) {
+        return { rows: [{ total: String(countResult ?? categoryProducts?.length ?? 0) }] };
+      }
+
+      // getCategories query
+      if (sql.includes('DISTINCT') && sql.includes('categories')) {
+        return { rows: categoriesRows ?? CATEGORIES.map((c) => ({ category: c })) };
+      }
+
+      // Entity detection ILIKE (p.name ILIKE — no LIMIT/OFFSET)
+      if (sql.includes('ILIKE') && sql.includes('products')) return { rows: [] };
+
+      // getProductos (all products — triggers hard limit)
+      if (sql.includes('products')) {
+        return { rows: allProducts ?? [] };
+      }
+
+      return { rows: [] };
+    });
+  }
+
+  test('> 20 productos → responde con categorías (no muestra todos)', async () => {
+    const id = sid();
+    const big = makeProducts(25);
+    mockDbPagination({ allProducts: big });
+
+    const { replyText, decision } = await processMessage({ text: 'que productos tienen', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(decision.strategy).toBe('intent');
+    expect(replyText).toContain('muchos productos');
+    expect(replyText).toContain('Electrónica');
+    expect(replyText).toContain('Accesorios');
+    expect(replyText).not.toContain('Producto 1');
+  });
+
+  test('> 20 productos → contexto queda en category_selection', async () => {
+    const id = sid();
+    mockDbPagination({ allProducts: makeProducts(25) });
+
+    await processMessage({ text: 'que productos tienen', sessionId: id, businessId: BUSINESS_ID });
+
+    const ctx = await getContext(id);
+    expect(ctx.lastIntent).toBe('category_selection');
+    expect(ctx.availableCategories).toEqual(CATEGORIES);
+  });
+
+  test('selección de categoría → muestra primeros 10 productos', async () => {
+    const id = sid();
+    const catProducts = makeProducts(15, 'Electrónica');
+
+    // Seed context as if we already showed categories
+    await updateContext(id, {
+      lastIntent: 'category_selection',
+      availableCategories: CATEGORIES,
+    });
+
+    mockDbPagination({ categoryProducts: catProducts, countResult: 15 });
+
+    const { decision, replyText } = await processMessage({ text: 'Electrónica', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(decision.strategy).toBe('category_select');
+    expect(replyText).toContain('Electrónica');
+    expect(replyText).toContain('Producto 1');
+  });
+
+  test('selección categoría con > 10 → muestra "ver más"', async () => {
+    const id = sid();
+    const catProducts = makeProducts(15, 'Bebidas');
+
+    await updateContext(id, {
+      lastIntent: 'category_selection',
+      availableCategories: CATEGORIES,
+    });
+
+    mockDbPagination({ categoryProducts: catProducts, countResult: 15 });
+
+    const { replyText } = await processMessage({ text: 'Bebidas', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(replyText).toContain('ver más');
+  });
+
+  test('selección categoría con ≤ 10 → NO muestra "ver más"', async () => {
+    const id = sid();
+    const catProducts = makeProducts(8, 'Accesorios');
+
+    await updateContext(id, {
+      lastIntent: 'category_selection',
+      availableCategories: CATEGORIES,
+    });
+
+    mockDbPagination({ categoryProducts: catProducts, countResult: 8 });
+
+    const { replyText } = await processMessage({ text: 'Accesorios', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(replyText).not.toContain('ver más');
+    expect(replyText).toContain('todo en esta categoría');
+  });
+
+  test('"ver más" → devuelve siguiente bloque', async () => {
+    const id = sid();
+    const catProducts = makeProducts(20, 'Electrónica');
+
+    // Seed pagination context
+    await updateContext(id, {
+      lastIntent: 'productos',
+      paginationCategory: 'Electrónica',
+      paginationOffset: 0,
+      paginationTotal: 20,
+    });
+
+    mockDbPagination({ categoryProducts: catProducts, countResult: 20 });
+
+    const { decision, replyText } = await processMessage({ text: 'ver más', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(decision.strategy).toBe('pagination');
+    expect(replyText).toContain('Electrónica');
+    expect(replyText).toContain('Producto 11');
+  });
+
+  test('"siguiente" también activa paginación', async () => {
+    const id = sid();
+    const catProducts = makeProducts(25, 'Electrónica');
+
+    await updateContext(id, {
+      lastIntent: 'productos',
+      paginationCategory: 'Electrónica',
+      paginationOffset: 0,
+      paginationTotal: 25,
+    });
+
+    mockDbPagination({ categoryProducts: catProducts, countResult: 25 });
+
+    const { decision } = await processMessage({ text: 'siguiente', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(decision.strategy).toBe('pagination');
+  });
+
+  test('nueva búsqueda reset contexto de paginación', async () => {
+    const id = sid();
+
+    // Seed pagination context
+    await updateContext(id, {
+      lastIntent: 'productos',
+      paginationCategory: 'Electrónica',
+      paginationOffset: 0,
+      paginationTotal: 20,
+      availableCategories: CATEGORIES,
+    });
+
+    // User asks about something completely new — product query, small result
+    db.query.mockImplementation(async (sql) => {
+      if (sql.includes('ILIKE')) return { rows: [{ id: 99, name: 'Agua Mineral', description: null, price: '20.00', is_available: true, stock_quantity: 10, category: 'Bebidas' }] };
+      return { rows: [] };
+    });
+
+    const { decision } = await processMessage({ text: 'tienen agua mineral', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(decision.strategy).toBe('entity');
+    expect(decision.entity.value).toBe('agua mineral');
+
+    const ctx = await getContext(id);
+    expect(ctx.paginationCategory).toBeNull();
+    expect(ctx.availableCategories).toBeNull();
+  });
+});
+

@@ -1,7 +1,650 @@
 # LLM Chat AI — Documentación del Proyecto
 
-> Última actualización: 30 de marzo de 2026 — Sprint 6 (context pipeline + tests)  
+> Última actualización: 31 de marzo de 2026 — Sprint 8 (paginación + formato de listas)
 > Estado: desarrollo activo
+
+---
+
+## Índice
+
+1. [Estructura del proyecto](#1-estructura-del-proyecto)
+2. [Variables de entorno](#2-variables-de-entorno)
+3. [Base de datos](#3-base-de-datos)
+4. [Flujo completo de un mensaje](#4-flujo-completo-de-un-mensaje)
+   - 4.1 [Frontend → Backend (envío)](#41-frontend--backend-envío)
+   - 4.2 [Backend — pipeline de procesamiento](#42-backend--pipeline-de-procesamiento)
+   - 4.3 [Backend → Frontend (respuesta)](#43-backend--frontend-respuesta)
+5. [Detalle de cada archivo clave](#5-detalle-de-cada-archivo-clave)
+6. [Historial de cambios](#6-historial-de-cambios)
+7. [Testing](#7-testing)
+8. [CI/CD — GitHub Actions](#8-cicd--github-actions)
+9. [Cómo extender el sistema](#9-cómo-extender-el-sistema)
+10. [Cómo correr el proyecto](#10-cómo-correr-el-proyecto)
+
+---
+
+## 1. Estructura del proyecto
+
+```
+aichat/
+├── backend/
+│   ├── .env
+│   ├── .env.example
+│   ├── server.js
+│   ├── src/
+│   │   ├── app.js
+│   │   ├── config/
+│   │   │   ├── database.js
+│   │   │   ├── env.js
+│   │   │   ├── redis.js
+│   │   │   └── schema.sql
+│   │   ├── middlewares/
+│   │   │   ├── errorHandler.js
+│   │   │   └── requestLogger.js
+│   │   ├── mockai/
+│   │   │   ├── intents.js
+│   │   │   └── keywordResponses.js
+│   │   ├── models/
+│   │   │   ├── businessModel.js
+│   │   │   └── messageModel.js
+│   │   ├── routes/
+│   │   │   ├── index.js
+│   │   │   └── messageRoutes.js
+│   │   ├── services/
+│   │   │   ├── businessInfoService.js
+│   │   │   ├── conversationalContext.js
+│   │   │   ├── dayDetector.js
+│   │   │   ├── entityDetector.js
+│   │   │   ├── intentDetector.js
+│   │   │   ├── intentResponseFormatter.js
+│   │   │   ├── messagePipeline.js
+│   │   │   ├── messageService.js
+│   │   │   ├── nlpEntityExtractor.js
+│   │   │   ├── normalize.js
+│   │   │   └── sessionContextService.js
+│   │   ├── sockets/
+│   │   │   └── chatSocket.js
+│   │   └── temp/
+│   │       └── mockOpenAI.js
+│   └── tests/
+│       ├── setup.js
+│       └── unit/
+│           ├── businessInfoService.test.js
+│           ├── conversationalFlow.test.js
+│           ├── dayDetector.test.js
+│           ├── entityDetector.test.js
+│           ├── intentResponseFormatter.test.js
+│           ├── intentService.test.js
+│           ├── keywordResponses.test.js
+│           ├── messageModel.test.js
+│           ├── mockOpenAI.test.js
+│           ├── nlpEntityExtractor.test.js
+│           ├── normalize.test.js
+│           └── sessionContextService.test.js
+│
+├── .github/
+│   └── workflows/
+│       └── ci.yml
+│
+└── frontend/
+    ├── index.html
+    ├── vite.config.js
+    └── src/
+        ├── App.jsx
+        ├── components/Chat/
+        │   ├── ChatWindow.jsx
+        │   ├── Message.jsx
+        │   ├── MessageInput.jsx
+        │   └── MessageList.jsx
+        ├── context/
+        │   └── ChatContext.jsx
+        ├── hooks/
+        │   └── useSocket.js
+        └── services/
+            └── socketService.js
+```
+
+---
+
+## 2. Variables de entorno
+
+### `backend/.env`
+
+```dotenv
+NODE_ENV=development
+PORT=3000
+CLIENT_URL=http://localhost:5173,http://192.168.1.3:5173
+
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=aichat
+DB_USER=postgres
+DB_PASSWORD=<tu_password>
+
+REDIS_HOST=localhost
+REDIS_PORT=6379
+```
+
+> `CLIENT_URL` acepta múltiples orígenes separados por coma. `env.js` los parsea en un array para CORS y Socket.io.
+> Si Redis no está disponible, el chat degrada elegantemente sin contexto conversacional.
+
+### `frontend/.env`
+
+```dotenv
+VITE_SOCKET_URL=http://localhost:3000
+```
+
+> `socketService.js` usa `window.location.origin` + proxy de Vite — esta variable se mantiene como referencia.
+
+---
+
+## 3. Base de datos
+
+Motor: **PostgreSQL**. Esquema en `backend/src/config/schema.sql`.
+
+### Tablas principales
+
+| Tabla                | Descripción |
+|----------------------|-------------|
+| `businesses`         | Negocios registrados |
+| `categories`         | Categorías de productos |
+| `products`           | Productos con precio y disponibilidad |
+| `product_inventory`  | Stock por producto (1-a-1 con products) |
+| `product_attributes` | Atributos clave/valor por producto |
+| `business_hours`     | Horarios por día (0=domingo … 6=sábado) |
+| `promotions`         | Promociones activas con fecha inicio/fin |
+| `business_services`  | Servicios del negocio |
+| `conversations`      | Sesiones de chat |
+| `messages`           | Mensajes individuales |
+
+### Seed
+
+| id | Nombre                  | Tipo        | Ciudad           |
+|----|-------------------------|-------------|------------------|
+| 1  | Restaurante Don Pepe    | restaurant  | Ciudad de México |
+| 2  | Ferretería El Tornillo  | hardware    | Guadalajara      |
+| 3  | Papelería La Pluma      | stationery  | Monterrey        |
+
+> El sistema trabaja con `business_id = 1` (`ACTIVE_BUSINESS_ID` en `chatSocket.js`).
+
+---
+
+## 4. Flujo completo de un mensaje
+
+### 4.1 Frontend → Backend (envío)
+
+```
+Usuario escribe "cuando abren el lunes?"
+        │
+        ▼
+[MessageInput.jsx]
+  handleSubmit() → sendMessage(trimmed)
+        │
+        ▼
+[useSocket.js]
+  sendMessage(text)
+  → socket.emit('send_message', { roomId, sender, text, sessionId })
+        │
+        ▼  WebSocket (ws://)
+[Vite Proxy]  /socket.io → http://localhost:3000
+        │
+        ▼
+[chatSocket.js]
+  socket.on('send_message', ({ roomId, sender, text, sessionId }))
+  → processMessage({ text, sessionId, businessId })
+```
+
+---
+
+### 4.2 Backend — pipeline de procesamiento (`messagePipeline.js`)
+
+El pipeline orquesta todos los servicios NLP y decide qué respuesta generar.
+
+```
+Mensaje: "abren el lunes?"   sessionId: "a3f2..."
+        │
+        ▼ 1. normalize(text)
+        │    "abren el lunes"
+        │
+        ▼ 2. detectDay(normalizedText)  [dayDetector.js]
+        │    Busca nombre de día con word-boundary regex
+        │    → { type: 'day', value: 'lunes', dayOfWeek: 1 }
+        │    (Si hay día detectado, se salta el paso de entityDetector)
+        │
+        ▼ 3. detectIntent(text)  [intentDetector.js]
+        │    Scoring de keywords contra intents.js
+        │    → { intent: 'horarios', score: 1, scores: { horarios: 1 } }
+        │
+        ▼ 4. detectEntities(text, businessId, intentResult)  [entityDetector.js]
+        │    OMITIDO — se detectó día en paso 2
+        │
+        ▼ 5. getContext(sessionId)  [sessionContextService.js → Redis]
+        │    Lee "session:{sessionId}" → { lastIntent, lastEntity, ... }
+        │
+        ▼ 6. decide(intentResult, entityResult, context, normalizedText)
+        │
+        │    ┌─────────────────────────────────────────────────────────┐
+        │    │ REGLAS DE DECISIÓN (en orden de prioridad)              │
+        │    │                                                         │
+        │    │ Regla -1a: "ver más" / "siguiente" + paginationCategory │
+        │    │   → strategy: 'pagination'                              │
+        │    │                                                         │
+        │    │ Regla -1b: texto coincide con availableCategories       │
+        │    │            AND lastIntent === 'category_selection'       │
+        │    │   → strategy: 'category_select'                         │
+        │    │                                                         │
+        │    │ Regla 0: entityResult.type === 'day'                    │
+        │    │   → strategy: 'entity', intent: 'horarios'              │
+        │    │   NUNCA usa contexto                                    │
+        │    │                                                         │
+        │    │ Regla 1: intent standalone + score ≥ 3                  │
+        │    │   → strategy: 'intent', ignora contexto                 │
+        │    │                                                         │
+        │    │ Regla 2: entidad detectada en el mensaje                │
+        │    │   → strategy: 'entity', ignora contexto                │
+        │    │                                                         │
+        │    │ Regla 3: intent no-standalone + entity en contexto      │
+        │    │   → strategy: 'context'  (combina intent + lastEntity)  │
+        │    │                                                         │
+        │    │ Regla 4: mensaje ambiguo + contexto disponible          │
+        │    │   → strategy: 'context'  (usa lastIntent + lastEntity)  │
+        │    │                                                         │
+        │    │ Regla 5: "¿Y pizza mexicana?" → extractFollowUpEntity   │
+        │    │   → strategy: 'followup'                                │
+        │    │                                                         │
+        │    │ Regla 6: ningún match → strategy: 'ai'                  │
+        │    └─────────────────────────────────────────────────────────┘
+        │
+        │    Resultado: { strategy: 'entity', intent: 'horarios',
+        │                  entity: { type:'day', value:'lunes', dayOfWeek:1 } }
+        │
+        ▼ 7. executeDecision(decision, text, businessId, context, sessionId)
+        │
+        │    Rama día + horarios → getHorariosByDay(businessId, 1)
+        │      → SELECT … FROM business_hours WHERE day_of_week = 1
+        │      → formatHorarioDay('lunes', row)
+        │      → "El Lunes abrimos de 9:00 am a 6:00 pm. 🕐"
+        │
+        │    ─────── Otras ramas de executeDecision ────────────────
+        │
+        │    Paginación ('pagination'):
+        │      → getProductosByCategory(businessId, cat, PAGE_SIZE, offset+10)
+        │      → updateContext(sessionId, { paginationOffset })
+        │      → formatProductPage(rows, newOffset, total, cat)
+        │
+        │    Selección de categoría ('category_select'):
+        │      → countProductosByCategory + getProductosByCategory(…, 0)
+        │      → updateContext(sessionId, { paginationCategory, … })
+        │      → formatProductPage(rows, 0, total, cat)
+        │
+        │    Precio de producto ('precios' + entity.type='product'):
+        │      → queryProducts(entity.value, businessId)
+        │      → "El producto *X* cuesta $Y."
+        │
+        │    Entidad producto en mensaje:
+        │      → queryProducts → formatProductResponse(entity, rows)
+        │
+        │    Intent puro (incluye hard-limit de productos):
+        │      → getBusinessInfoByIntent(intent, businessId)
+        │      → si productos.length > 20:
+        │           getCategories(businessId)
+        │           formatCategoryPrompt(categories)
+        │           → "Tenemos muchos productos… ¿Buscas algo en específico?"
+        │      → sino: formatIntentResponse(intent, data)
+        │
+        │    Fallback IA:
+        │      → getKeywordResponse(text)  ||  getMockOpenAIResponse(text, ctx)
+        │
+        ▼ 8. buildContextUpdate(decision) + updateContext(sessionId, update)
+             Persiste en Redis (TTL 210 s, renovado con cada turno activo)
+             Entidad nueva → guarda entity + limpia paginación
+             Intent standalone → guarda intent + limpia entity + limpia paginación
+             Paginación/categoría → gestionado directamente por executeDecision
+```
+
+#### Tabla de ejemplos con el pipeline actual
+
+| Turno | Mensaje | Regla activa | Estrategia | Respuesta |
+|-------|---------|--------------|------------|-----------|
+| 1 | "que productos tienen?" | Regla 1 (standalone) | intent | Si >20 prods: lista de categorías |
+| 2 | "Electrónica" | Regla -1b (categoría) | category_select | Primeros 10 de Electrónica |
+| 3 | "ver más" | Regla -1a (paginación) | pagination | Productos 11–20 de Electrónica |
+| 4 | "precio hamburguesa" | Regla 2 (entidad) | entity | "El producto *Hamburguesa* cuesta $150.00." |
+| 5 | "¿y cuánto cuesta?" | Regla 3 (context) | context | Precio de hamburguesa (del contexto) |
+| 6 | "abren el lunes?" | Regla 0 (día) | entity | "El Lunes abrimos de 9:00 am a 6:00 pm. 🕐" |
+| 7 | "abren toda la semana?" | Regla 1 (standalone) | intent | Tabla de horarios completa |
+| 8 | "¿y la pizza mexicana?" | Regla 5 (follow-up) | followup | Tarjeta de pizza mexicana |
+
+---
+
+### 4.3 Backend → Frontend (respuesta)
+
+```
+Backend genera replyText
+        │
+        ▼
+[MessageService.saveMessage({ roomId, sender: 'Bot', text: replyText })]
+  → store en memoria → objeto { id, roomId, sender, text, createdAt }
+        │
+        ▼
+[io.to(roomId).emit('receive_message', botMessage)]
+        │
+        ▼  WebSocket
+[useSocket.js]
+  socket.on('receive_message', addMessage)
+        │
+        ▼
+[ChatContext] → setMessages(prev => [...prev, message])
+        │
+        ▼
+[Message.jsx]
+  <p style={{ whiteSpace: 'pre-wrap' }}>{message.text}</p>
+  (pre-wrap respeta los \n del formateador → listas visibles)
+```
+
+---
+
+## 5. Detalle de cada archivo clave
+
+### `messagePipeline.js`
+**Orquestador principal del sistema NLP.** Reemplaza la lógica que antes estaba en `chatSocket.js`. Exporta `processMessage({ text, sessionId, businessId })` que ejecuta todos los pasos del pipeline y retorna `{ replyText, decision, logs }`.
+
+Contiene además las funciones puras exportadas para testing:
+- `decide(intentResult, entityResult, context, normalizedText)` → aplica las 8 reglas y devuelve `PipelineDecision`
+- `buildContextUpdate(decision)` → calcula el objeto parcial a persistir en Redis
+- `isAmbiguous(normalizedText)` → `true` para mensajes cortos o patrones de seguimiento
+- `extractFollowUpEntity(normalizedText, lastEntity)` → detecta "¿Y X?" cuando hay track activo
+- Constantes de paginación: `PRODUCTS_HARD_LIMIT = 20`, `PAGE_SIZE = 10`
+
+### `dayDetector.js`
+Detecta el primer nombre de día en español (con/sin tilde) usando word-boundary regex. Devuelve `{ type: 'day', value: 'lunes', dayOfWeek: 1 }` o `null`. El valor `dayOfWeek` sigue la convención PostgreSQL: 0=domingo, 6=sábado.
+
+### `entityDetector.js`
+Extrae entidades de tipo `product` o `category` del mensaje usando:
+1. **19 patrones regex** con named capture group `(?<entity>…)` para frases en español (incluyendo patrones `precio X`, `que precio tiene X`, `cual es el precio de X`)
+2. **Fallback Compromise NLP** (solo si hay trigger word en el mensaje)
+3. Consulta PostgreSQL con `ILIKE` para confirmar que el candidato existe en la BD
+4. Exporta `formatProductResponse(entity, rows)` y `formatCategoryResponse(category, rows)` con listas estructuradas
+
+### `intentDetector.js`
+Scoring de keywords contra `intents.js`. Cada keyword tiene un `weight`. El intent ganador es el de mayor suma de pesos, si supera `MIN_CONFIDENCE = 1`. Exporta `isStandaloneIntent(key)` para distinguir intents que no necesitan entidad (`horarios`, `ubicacion`, `promociones`).
+
+### `intents.js`
+Árbol de 5 intenciones. Cada intent incluye `standalone: bool` y `keywords[]` con `{ phrase, weight }`. Los pesos tipicamente son 1–3; frases muy específicas como `"abren toda la semana"` tienen peso 3 para ganar siempre sobre palabras sueltas.
+
+**Intents disponibles:** `horarios`, `productos`, `precios`, `promociones`, `ubicacion`
+
+### `intentResponseFormatter.js`
+Formateadores que convierten filas de la BD en texto con `\n`. Usa el helper interno `formatList(title, items)` que produce:
+
+```
+título\n\n• item 1\n• item 2\n• item N
+```
+
+Un formateador por intent en el objeto `FORMATTERS`. Exporta además `formatHorarioDay(dayKey, row)` para respuestas de un día específico y `formatList` para reuso externo.
+
+### `businessModel.js`
+Queries SQL por intent + `business_id`. Métodos actuales:
+
+| Método | Query |
+|--------|-------|
+| `getHorarios` | `business_hours ORDER BY day_of_week` |
+| `getHorariosByDay` | `business_hours WHERE day_of_week = $2` |
+| `getProductos` | `products + inventory + categories, is_available=TRUE` |
+| `getProductosByCategory` | Igual con `c.name ILIKE $2`, `LIMIT $3 OFFSET $4` |
+| `countProductosByCategory` | `COUNT(*) WHERE category ILIKE` |
+| `getCategories` | `DISTINCT c.name` de productos disponibles |
+| `getPrecios` | `name, price ORDER BY price ASC` |
+| `getPromociones` | `promotions WHERE end_date >= CURRENT_DATE` |
+| `getUbicacion` | `businesses WHERE id = $1` |
+
+### `businessInfoService.js`
+Despacha intent → `BusinessModel` via `QUERY_MAP`. Exporta también `getHorariosByDay`, `getCategories`, `getProductosByCategory` y `countProductosByCategory` para uso directo en `messagePipeline`.
+
+### `sessionContextService.js`
+Capa de acceso al contexto de sesión en Redis. Clave: `session:{sessionId}`. TTL: 210 s.
+
+**Estructura del contexto en Redis:**
+```json
+{
+  "lastIntent": "productos",
+  "lastEntity": { "type": "product", "value": "hamburguesa" },
+  "availableCategories": ["Electrónica", "Bebidas"],
+  "paginationCategory": "Electrónica",
+  "paginationOffset": 10,
+  "paginationTotal": 25,
+  "updatedAt": "2026-03-31T12:00:00.000Z"
+}
+```
+
+Los campos de paginación se limpian automáticamente cuando el usuario realiza una búsqueda nueva.
+
+### `normalize.js`
+Funciones de normalización: `normalize(text)` (lowercase + NFD strip acentos + quitar ¿¡), `toSingular(word)`, `wordVariants(word)`.
+
+### `chatSocket.js`
+Punto de entrada Socket.io. Maneja `send_message` → valida `sessionId` → guarda mensaje de usuario → llama `processMessage()` → guarda y emite respuesta del bot.
+
+### `Message.jsx`
+Componente de mensaje del frontend. Usa `white-space: pre-wrap` para que los `\n` del formateador se rendericen como saltos de línea en el navegador.
+
+### `socketService.js`
+Singleton de socket.io-client. `getSessionId()` genera un UUID v4 con `crypto.randomUUID()` la primera vez y lo persiste en `sessionStorage` (cada pestaña tiene su propio contexto).
+
+---
+
+## 6. Historial de cambios
+
+### Sprint 1 — Infraestructura base
+- Express + Socket.io + React + Vite scaffoldeado
+- Mensajes en tiempo real con rooms
+- Store de mensajes en memoria (`messageModel.js`)
+- Respuestas mock OpenAI + keyword responses
+
+### Sprint 2 — Intenciones y base de datos
+- Árbol de 5 intents (`intents.js`)
+- Queries SQL (`businessModel.js`)
+- Detección de intent por keywords (`intentService.js`)
+- QUERY_MAP + despacho (`businessInfoService.js`)
+- Formateadores de respuesta (`intentResponseFormatter.js`)
+- **Bug:** `module.exports = null` en `database.js` sobreescribía el Pool — corregido
+- **Bug:** `CLIENT_URL` debe parsearse como array para multi-origen — corregido
+
+### Sprint 3 — Acceso desde red local
+- `CLIENT_URL` acepta lista separada por comas
+- `socketService.js` usa `window.location.origin` en lugar de URL hardcodeada
+- La app funciona desde celular en la misma red Wi-Fi
+
+### Sprint 4 — NLP y extracción de entidades
+- Instalado `compromise`
+- `nlpEntityExtractor.js`: 14 patrones regex + fallback NLP + `ENTITY_BLOCKLIST` + consulta `ILIKE`
+- **Pipeline:** entity (Stage 1) → intent (Stage 2) → AI fallback (Stage 3)
+
+### Sprint 5 — Testing y CI/CD *(29 mar 2026)*
+- Jest instalado + 6 suites de test (179 pruebas)
+- `.github/workflows/ci.yml`: lint → test matrix (Node 18+20) → coverage + Codecov
+- **Bug detectado en tests:** keyword `"sale"` en `promociones` hacía falso positivo con `"sucursales"` — eliminada
+
+### Sprint 6 — Contexto conversacional con Redis *(30 mar 2026)*
+- `ioredis` instalado
+- `redis.js`: cliente singleton con `lazyConnect` y `retryStrategy`
+- `sessionContextService.js`: `getContext`/`updateContext` con TTL 210 s
+- `conversationalContext.js`: funciones puras de resolución de contexto
+- `chatSocket.js`: pipeline reescrito con contexto completo
+- `sessionStorage` + `getSessionId()` en frontend
+- Nuevas suites: `sessionContextService`, `mockOpenAI`, `conversationalFlow` (251 pruebas total)
+
+### Sprint 7 — Pipeline unificado (`messagePipeline.js`) *(30 mar 2026)*
+- **Creado `messagePipeline.js`** — reemplaza la orquestación que estaba en `chatSocket.js`
+- **Creado `intentDetector.js`** — scoring por peso en lugar de simple `includes()`
+- **Creado `entityDetector.js`** — extractor multi-entidad con 19 patrones regex
+- **Creado `dayDetector.js`** — detección de días de la semana en español
+- 8 Reglas de decisión (`decide()`): day → standalone → entity → context → ambiguous → followup → ai
+- **Bug corregido:** `"precio hamburguesa"` devolvía resultados del contexto en vez del mensaje
+- **Bug corregido:** `"abren el lunes"` terminaba en AI fallback
+- **Bug corregido:** `"abren toda la semana?"` usaba contexto en vez de responder directamente
+- Nuevas suites: `dayDetector`, `entityDetector`, `normalize`, `conversationalFlow` ampliada (371 pruebas)
+
+### Sprint 8 — Formato de listas + paginación *(31 mar 2026)*
+
+#### Mejoras de formato
+- `intentResponseFormatter.js`: helper `formatList(title, items)` — todas las respuestas multi-resultado usan `\n\n` entre título e items, y `\n` entre items; `exportado`
+- `entityDetector.js`: `formatProductResponse` y `formatCategoryResponse` usan bullet `•`  por item con stock y disponibilidad
+- `Message.jsx`: `white-space: pre-wrap` aplicado — los `\n` ahora se renderizan como saltos de línea en el navegador
+
+#### Paginación de catálogo (`messagePipeline.js`)
+- Si `productos.length > 20` → pivot: mostrar lista de categorías en vez del catálogo completo
+- Usuario selecciona categoría → se carga la primera página (10 productos)
+- "ver más" / "siguiente" → siguiente bloque de 10
+- Estado de paginación guardado en Redis: `paginationCategory`, `paginationOffset`, `paginationTotal`
+- Nueva búsqueda → limpia estado de paginación automáticamente
+
+#### Nuevos métodos en `businessModel.js`
+- `getCategories(businessId)` — categorías distintas disponibles
+- `getProductosByCategory(businessId, cat, limit, offset)` — productos paginados
+- `countProductosByCategory(businessId, cat)` — total para calcular "1–10 de 25"
+
+#### Tests añadidos (379 pruebas total)
+- 8 nuevos casos en `conversationalFlow.test.js`: hard-limit, contexto category_selection, selección de categoría, paginación, reset de contexto
+
+---
+
+## 7. Testing
+
+**379 pruebas** en **12 suites** — todas pasan (`npm test`).
+
+### Ejecutar los tests
+
+```bash
+cd backend
+npm test                 # Corre todos los tests una vez
+npm run test:watch       # Modo interactivo
+npm run test:coverage    # Reporte HTML en ./coverage/
+```
+
+### Suites
+
+| Archivo | Módulo cubierto | Aprox. casos |
+|---|---|---|
+| `businessInfoService.test.js` | QUERY_MAP, despacho, errores BD | 13 |
+| `conversationalFlow.test.js` | Pipeline multi-turno, decide(), buildContextUpdate(), paginación | ~80 |
+| `dayDetector.test.js` | Detección de 7 días, word-boundary, sin match | ~15 |
+| `entityDetector.test.js` | 19 patrones regex, blocklist, formatters | ~50 |
+| `intentResponseFormatter.test.js` | formatList, 5 formatters, formatTime, fallbacks | ~35 |
+| `intentService.test.js` | 5 intents, scoring, edge cases | ~70 |
+| `keywordResponses.test.js` | Keywords, sin match, guards | 16 |
+| `messageModel.test.js` | create(), findByRoom(), clear() | 10 |
+| `mockOpenAI.test.js` | Sin contexto, con producto, con intent | ~20 |
+| `nlpEntityExtractor.test.js` | normalize(), patrones, blocklist, trigger, NLP | ~36 |
+| `normalize.test.js` | Funciones de normalización y variantes | ~15 |
+| `sessionContextService.test.js` | getContext/updateContext, TTL, merge parcial | ~30 |
+
+### Mocking
+
+| Módulo | Test que lo mockea | Razón |
+|---|---|---|
+| `../../src/config/database` | `entityDetector`, `conversationalFlow`, `nlpEntityExtractor` | Evitar PostgreSQL real |
+| `ioredis` | `sessionContextService`, `conversationalFlow` | Evitar Redis real (Map en memoria) |
+| `../../src/models/businessModel` | `businessInfoService` | Aislar QUERY_MAP |
+
+---
+
+## 8. CI/CD — GitHub Actions
+
+Archivo: `.github/workflows/ci.yml`
+Activa en **push** y **pull request** sobre `main` y `develop`.
+
+```
+┌─────────┐     ┌────────────────────────┐     ┌──────────────────┐
+│  lint   │────▶│  test (Node 18 + 20)   │────▶│  coverage        │
+│ ESLint  │     │  matrix: fail-fast off │     │  Node 20 solo    │
+│ Node 20 │     │  artifacts: JUnit XML  │     │  HTML + Codecov  │
+└─────────┘     └────────────────────────┘     └──────────────────┘
+```
+
+Secreto requerido: `CODECOV_TOKEN` (en Settings → Secrets → Actions).
+
+---
+
+## 9. Cómo extender el sistema
+
+### Agregar un nuevo intent
+
+1. `intents.js` → nueva clave con `standalone`, `keywords[]`
+2. `businessModel.js` → nuevo método con la query SQL
+3. `businessInfoService.js` → entrada en `QUERY_MAP`
+4. `intentResponseFormatter.js` → nueva función en `FORMATTERS`
+
+### Agregar patrones de consulta de producto
+
+`entityDetector.js` → `PRODUCT_QUERY_PATTERNS[]`: agregar regex con `(?<entity>…)`.
+Si es un verbo/trigger nuevo, añadirlo a `PRODUCT_TRIGGER_WORDS`.
+
+### Cambiar el límite de paginación
+
+`messagePipeline.js`:
+- `PRODUCTS_HARD_LIMIT = 20` — máximo antes de mostrar categorías
+- `PAGE_SIZE = 10` — productos por página
+
+### Cambiar el TTL del contexto
+
+`sessionContextService.js` → `SESSION_TTL_SECONDS` (default: `210`).
+
+### Soporte multi-negocio
+
+`chatSocket.js` tiene `ACTIVE_BUSINESS_ID = 1`. Para multi-negocio, el frontend debe enviar `businessId` en el payload de `send_message` y pasarlo a `processMessage`.
+
+### Activar OpenAI real
+
+1. `backend/.env` → `OPENAI_API_KEY=sk-…`
+2. Crear `src/services/openaiService.js`
+3. En `executeDecision()` de `messagePipeline.js`, reemplazar `getMockOpenAIResponse()` por `await openaiService.chat(text, context)`
+
+---
+
+## 10. Cómo correr el proyecto
+
+### Requisitos
+
+- Node.js ≥ 18
+- PostgreSQL corriendo en el puerto 5432
+- Redis corriendo en el puerto 6379
+
+```bash
+# Aplicar esquema y seed
+psql -U postgres -d aichat -f backend/src/config/schema.sql
+```
+
+> **Redis en Windows:** WSL2 (`sudo apt install redis-server`) o Docker (`docker run -d -p 6379:6379 redis:alpine`).
+> Sin Redis, el chat funciona sin contexto conversacional.
+
+### Backend
+
+```bash
+cd backend
+cp .env.example .env   # solo la primera vez — editar con credenciales de postgres
+npm install
+npm run dev            # nodemon en puerto 3000
+```
+
+### Frontend
+
+```bash
+cd frontend
+cp .env.example .env   # solo la primera vez
+npm install
+npm run dev            # Vite en puerto 5173
+```
+
+### Acceso
+
+| Dispositivo | URL |
+|-------------|-----|
+| PC | http://localhost:5173 |
+| Celular (misma Wi-Fi) | http://192.168.1.3:5173 |
+
+> Si cambia tu IP local, actualizar solo `CLIENT_URL` en `backend/.env`.
+
 
 ---
 

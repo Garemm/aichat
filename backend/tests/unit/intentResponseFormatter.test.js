@@ -66,7 +66,7 @@ describe('formatIntentResponse("horarios", ...)', () => {
 
   test('shows "Cerrado" for closed days', () => {
     const result = formatIntentResponse('horarios', HORARIOS_ROWS);
-    expect(result).toContain('Domingo: Cerrado');
+    expect(result).toContain('Domingo: Cerrado 🔒');
   });
 
   test('formats an AM open time correctly', () => {
@@ -118,8 +118,8 @@ describe('formatIntentResponse("productos", ...)', () => {
 
   test('includes category when present', () => {
     const result = formatIntentResponse('productos', PRODUCTOS_ROWS);
-    expect(result).toContain('[Hamburguesas]');
-    expect(result).toContain('[Bebidas]');
+    expect(result).toContain('Hamburguesas');
+    expect(result).toContain('Bebidas');
   });
 
   test('includes stock count when present', () => {

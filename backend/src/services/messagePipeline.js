@@ -29,14 +29,108 @@
 const { normalize } = require('./normalize');
 const { detectIntent, isStandaloneIntent } = require('./intentDetector');
 const { detectEntities, queryProducts, formatProductResponse } = require('./entityDetector');
+const { detectDay } = require('./dayDetector');
 const { getContext, updateContext } = require('./sessionContextService');
-const { getBusinessInfoByIntent } = require('./businessInfoService');
-const { formatIntentResponse } = require('./intentResponseFormatter');
+const {
+  getBusinessInfoByIntent,
+  getHorariosByDay,
+  getCategories,
+  getProductosByCategory,
+  countProductosByCategory,
+} = require('./businessInfoService');
+const { formatIntentResponse, formatHorarioDay, formatList } = require('./intentResponseFormatter');
 const { getKeywordResponse } = require('../mockai/keywordResponses');
 const { getMockOpenAIResponse } = require('../temp/mockOpenAI');
 
 /** Minimum score to consider intent as "high confidence" (skip context). */
 const HIGH_CONFIDENCE_THRESHOLD = 3;
+
+/** Max products to show in one turn before asking user to narrow down. */
+const PRODUCTS_HARD_LIMIT = 20;
+
+/** Products per paginated page inside a category. */
+const PAGE_SIZE = 10;
+
+// ─── Pagination / category navigation helpers ─────────────────────────────────
+
+/** Patterns that mean "show me next page". */
+const SEE_MORE_PATTERNS = [
+  /^ver mas$/,
+  /^mas$/,
+  /^siguiente$/,
+  /^siguiente pagina$/,
+  /^mas productos$/,
+  /^mas resultados$/,
+  /^continuar$/,
+  /^mas opciones$/,
+];
+
+function isSeekingMore(normalizedText) {
+  return SEE_MORE_PATTERNS.some((p) => p.test(normalizedText));
+}
+
+/**
+ * Normalizes a string for loose category matching (removes accents, lowercase).
+ * @param {string} s
+ * @returns {string}
+ */
+function normalizeForMatch(s) {
+  return s
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim();
+}
+
+/**
+ * Returns the original category name from availableCategories that best matches
+ * the user's message, or null if no match found.
+ *
+ * @param {string}   normalizedText
+ * @param {string[]} availableCategories
+ * @returns {string|null}
+ */
+function detectCategorySelection(normalizedText, availableCategories) {
+  if (!availableCategories || availableCategories.length === 0) return null;
+  const textNorm = normalizeForMatch(normalizedText);
+  for (const cat of availableCategories) {
+    if (textNorm.includes(normalizeForMatch(cat))) return cat;
+  }
+  return null;
+}
+
+/**
+ * Formats the "too many results" pivot response that shows available categories.
+ * @param {string[]} categories
+ * @returns {string}
+ */
+function formatCategoryPrompt(categories) {
+  const catList = formatList('📂 Categorías disponibles:', categories);
+  return `Tenemos muchos productos disponibles. ¿Buscas algo en específico?\n\n${catList}`;
+}
+
+/**
+ * Formats a paginated product slice.
+ * @param {object[]} rows      Current page rows
+ * @param {number}   offset    Current offset
+ * @param {number}   total     Total count in category
+ * @param {string}   category  Category display name
+ * @returns {string}
+ */
+function formatProductPage(rows, offset, total, category) {
+  const end = offset + rows.length;
+  const header = `📦 ${category} (${offset + 1}–${end} de ${total}):`;
+  const items = rows.map((r) => {
+    const stock = r.stock_quantity != null ? ` · stock: ${r.stock_quantity}` : '';
+    const avail = r.is_available !== false ? '✅' : '❌';
+    return `${avail} ${r.name} — $${Number(r.price).toFixed(2)}${stock}`;
+  });
+  const base = formatList(header, items);
+  if (end < total) {
+    return `${base}\n\nEscribe *"ver más"* para ver los siguientes productos.`;
+  }
+  return `${base}\n\n✅ Eso es todo en esta categoría.`;
+}
 
 // ─── Ambiguity detection ──────────────────────────────────────────────────────
 
@@ -139,6 +233,40 @@ function decide(intentResult, entityResult, context, normalizedText) {
   const hasEntity = entityResult.type !== null && entityResult.value !== null;
   const standalone = hasIntent && isStandaloneIntent(intentResult.intent);
   const highConfidence = intentResult.score >= HIGH_CONFIDENCE_THRESHOLD;
+
+  // Rule -1a: User is paginating ("ver más") inside a category flow
+  if (isSeekingMore(normalizedText) && context.paginationCategory) {
+    return {
+      strategy: 'pagination',
+      intent: 'productos',
+      entity: { type: null, value: null },
+      usedContext: true,
+      reason: 'pagination: next page requested',
+    };
+  }
+
+  // Rule -1b: User is selecting a category from the prompted list
+  const selectedCat = detectCategorySelection(normalizedText, context.availableCategories);
+  if (selectedCat && context.lastIntent === 'category_selection') {
+    return {
+      strategy: 'category_select',
+      intent: 'productos',
+      entity: { type: 'category', value: selectedCat },
+      usedContext: true,
+      reason: `category selected: "${selectedCat}"`,
+    };
+  }
+
+  // Rule 0: Day-of-week entity detected → always horarios, never needs context
+  if (entityResult.type === 'day') {
+    return {
+      strategy: 'entity',
+      intent: 'horarios',
+      entity: { type: 'day', value: entityResult.value, dayOfWeek: entityResult.dayOfWeek },
+      usedContext: false,
+      reason: `day "${entityResult.value}" detected → horarios`,
+    };
+  }
 
   // Rule 1: High-confidence standalone intent → use intent alone, ignore everything
   if (hasIntent && standalone && highConfidence) {
@@ -243,11 +371,26 @@ function decide(intentResult, entityResult, context, normalizedText) {
  * @returns {Record<string, any>}  Partial update for Redis (or {} for no-op)
  */
 function buildContextUpdate(decision) {
+  // Pagination advance — offset is managed inside executeDecision via direct updateContext
+  if (decision.strategy === 'pagination') return {};
+
+  // Category selected — reset pagination state; executeDecision will set it
+  if (decision.strategy === 'category_select') return {};
+
   // Entity detected → track entity, clear intent (new track)
   if (decision.entity?.value && !decision.usedContext) {
+    const entityToStore = { type: decision.entity.type, value: decision.entity.value };
+    if (decision.entity.type === 'day' && decision.entity.dayOfWeek !== undefined) {
+      entityToStore.dayOfWeek = decision.entity.dayOfWeek;
+    }
     return {
       lastIntent: decision.intent,
-      lastEntity: { type: decision.entity.type, value: decision.entity.value },
+      lastEntity: entityToStore,
+      // New entity detected → clear any lingering pagination / category state
+      paginationCategory: null,
+      paginationOffset: null,
+      paginationTotal: null,
+      availableCategories: null,
     };
   }
 
@@ -255,6 +398,10 @@ function buildContextUpdate(decision) {
   if (decision.strategy === 'followup' && decision.entity?.value) {
     return {
       lastEntity: { type: decision.entity.type, value: decision.entity.value },
+      paginationCategory: null,
+      paginationOffset: null,
+      paginationTotal: null,
+      availableCategories: null,
     };
   }
 
@@ -263,6 +410,10 @@ function buildContextUpdate(decision) {
     return {
       lastIntent: decision.intent,
       lastEntity: { type: null, value: null },
+      paginationCategory: null,
+      paginationOffset: null,
+      paginationTotal: null,
+      availableCategories: null,
     };
   }
 
@@ -285,7 +436,71 @@ function buildContextUpdate(decision) {
  * @param {{ lastIntent: string|null, lastEntity: object|null }} context
  * @returns {Promise<string>}
  */
-async function executeDecision(decision, originalText, businessId, context) {
+async function executeDecision(decision, originalText, businessId, context, sessionId) {
+  // ── Pagination: next page of the current category ──────────────────────────
+  if (decision.strategy === 'pagination') {
+    try {
+      const cat    = context.paginationCategory;
+      const offset = (context.paginationOffset ?? 0) + PAGE_SIZE;
+      const total  = context.paginationTotal ?? 0;
+      const rows   = await getProductosByCategory(businessId, cat, PAGE_SIZE, offset);
+      if (rows.length === 0) {
+        return `Ya no hay más productos en ${cat}. ¿Puedo ayudarte con algo más?`;
+      }
+      await updateContext(sessionId, { paginationOffset: offset });
+      return formatProductPage(rows, offset, total, cat);
+    } catch (err) {
+      console.error('[Pipeline] Error paginating products:', err.message);
+    }
+  }
+
+  // ── Category selection: user picked a category ─────────────────────────────
+  if (decision.strategy === 'category_select') {
+    try {
+      const cat   = decision.entity.value;
+      const total = await countProductosByCategory(businessId, cat);
+      const rows  = await getProductosByCategory(businessId, cat, PAGE_SIZE, 0);
+      await updateContext(sessionId, {
+        lastIntent: 'productos',
+        lastEntity: { type: 'category', value: cat },
+        paginationCategory: cat,
+        paginationOffset: 0,
+        paginationTotal: total,
+        availableCategories: null,
+      });
+      if (rows.length === 0) {
+        return `No encontré productos en la categoría "${cat}".`;
+      }
+      return formatProductPage(rows, 0, total, cat);
+    } catch (err) {
+      console.error('[Pipeline] Error loading category:', err.message);
+    }
+  }
+
+  // Horarios for a specific day
+  if (decision.intent === 'horarios' && decision.entity?.type === 'day') {
+    try {
+      const row = await getHorariosByDay(businessId, decision.entity.dayOfWeek);
+      return formatHorarioDay(decision.entity.value, row);
+    } catch (err) {
+      console.error('[Pipeline] Error querying horarios by day:', err.message);
+    }
+  }
+
+  // Price-specific response: intent=precios + product entity (from message OR context)
+  if (decision.intent === 'precios' && decision.entity?.type === 'product' && decision.entity?.value) {
+    try {
+      const rows = await queryProducts(decision.entity.value, businessId);
+      if (rows.length === 0) {
+        return `Lo siento, no encontré el producto "*${decision.entity.value}*". ¿Quieres ver nuestro catálogo?`;
+      }
+      const p = rows[0];
+      return `El producto *${p.name}* cuesta $${Number(p.price).toFixed(2)}.`;
+    } catch (err) {
+      console.error('[Pipeline] Error querying product price:', err.message);
+    }
+  }
+
   // Entity-based response: query product/category
   if (decision.entity?.value && (decision.strategy === 'entity' || decision.strategy === 'context' || decision.strategy === 'followup')) {
     if (decision.entity.type === 'product') {
@@ -302,18 +517,23 @@ async function executeDecision(decision, originalText, businessId, context) {
 
   // Intent-based response
   if (decision.intent) {
-    // If we have both intent (precios) and entity (product), query the specific product
-    if (decision.entity?.value && decision.intent === 'precios') {
-      try {
-        const rows = await queryProducts(decision.entity.value, businessId);
-        return formatProductResponse(decision.entity.value, rows);
-      } catch (err) {
-        console.error('[Pipeline] Error querying product for price:', err.message);
-      }
-    }
-
     try {
       const data = await getBusinessInfoByIntent(decision.intent, businessId);
+
+      // Hard limit for productos: if too many, prompt with category list instead
+      if (decision.intent === 'productos' && Array.isArray(data) && data.length > PRODUCTS_HARD_LIMIT) {
+        const categories = await getCategories(businessId);
+        // Signal to processMessage to override buildContextUpdate()
+        decision._ctxOverride = {
+          lastIntent: 'category_selection',
+          availableCategories: categories,
+          paginationCategory: null,
+          paginationOffset: null,
+          paginationTotal: null,
+        };
+        return formatCategoryPrompt(categories);
+      }
+
       return formatIntentResponse(decision.intent, data);
     } catch (err) {
       console.error('[Pipeline] Error querying intent:', err.message);
@@ -342,16 +562,21 @@ async function processMessage({ text, sessionId, businessId }) {
   // 1. Normalize
   const normalizedText = normalize(text);
 
-  // 2. Detect intent (scoring)
+  // 2. Detect day entity (highest priority — skips DB lookup entirely)
+  const dayEntity = detectDay(normalizedText);
+
+  // 3. Detect intent (scoring)
   const intentResult = detectIntent(text);
 
-  // 3. Detect entities (DB lookup)
-  const entityResult = await detectEntities(text, businessId, intentResult);
+  // 4. Detect entities (DB lookup — skipped when day detected)
+  const entityResult = dayEntity
+    ? dayEntity
+    : await detectEntities(text, businessId, intentResult);
 
-  // 4. Get context from Redis
+  // 5. Get context from Redis
   const context = await getContext(sessionId);
 
-  // 5. Make decision
+  // 6. Make decision
   const decision = decide(intentResult, entityResult, context, normalizedText);
 
   // Logging
@@ -371,7 +596,7 @@ async function processMessage({ text, sessionId, businessId }) {
   console.log('[Pipeline]', JSON.stringify(logs, null, 2));
 
   // 6. Execute decision → response
-  const replyText = await executeDecision(decision, text, businessId, context);
+  const replyText = await executeDecision(decision, text, businessId, context, sessionId);
 
   // 7. Update context
   // Special case: if a product entity was detected in text but NOT found in DB,
@@ -386,6 +611,9 @@ async function processMessage({ text, sessionId, businessId }) {
       lastIntent: 'productos',
       lastEntity: { type: null, value: null },
     };
+  } else if (decision._ctxOverride !== undefined) {
+    // executeDecision computed a specific context update (e.g. category pivot)
+    contextUpdate = decision._ctxOverride;
   } else {
     contextUpdate = buildContextUpdate(decision);
   }
