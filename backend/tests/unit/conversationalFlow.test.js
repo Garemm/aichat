@@ -439,6 +439,157 @@ describe('processMessage() — full pipeline', () => {
 
     expect(decision.intent).toBe('promociones');
   });
+
+  test('"productos disponibles" sin contexto → intent=productos (no AI fallback)', async () => {
+    // Reproduces the bug: user picks "Productos disponibles" from the fallback menu
+    // with no session context and receives the generic error message again.
+    mockDbNoMatch();
+    const id = sid();
+
+    const { decision, replyText } = await processMessage({
+      text: 'productos disponibles',
+      sessionId: id,
+      businessId: BUSINESS_ID,
+    });
+
+    expect(decision.strategy).not.toBe('ai');
+    expect(decision.intent).toBe('productos');
+    // Must NOT return the generic "no estoy seguro" fallback message
+    expect(replyText).not.toContain('No estoy seguro');
+  });
+
+  test('"productos" solo sin contexto → intent=productos', async () => {
+    mockDbNoMatch();
+    const id = sid();
+
+    const { decision } = await processMessage({
+      text: 'productos',
+      sessionId: id,
+      businessId: BUSINESS_ID,
+    });
+
+    expect(decision.intent).toBe('productos');
+    expect(decision.strategy).not.toBe('ai');
+  });
+
+  test('"ver catalogo" sin contexto → intent=productos', async () => {
+    mockDbNoMatch();
+    const id = sid();
+
+    const { decision } = await processMessage({
+      text: 'ver catalogo',
+      sessionId: id,
+      businessId: BUSINESS_ID,
+    });
+
+    expect(decision.intent).toBe('productos');
+    expect(decision.strategy).not.toBe('ai');
+  });
+});
+
+// ─── General catalog query debe romper contexto de producto previo ────────────
+
+describe('General catalog query no hereda entidad de contexto', () => {
+  const BUSINESS_ID = 1;
+
+  const mockPizzaMex  = { id: 1, name: 'Pizza Mexicana',  description: null, price: '120.00', is_available: true, stock_quantity: 5,  category: 'Pizzas' };
+  const mockPizzaHaw  = { id: 2, name: 'Pizza Hawaiana',  description: null, price: '115.00', is_available: true, stock_quantity: 8,  category: 'Pizzas' };
+
+  function mockDbByName(...products) {
+    db.query.mockImplementation(async (sql, params) => {
+      if (!sql.includes('ILIKE')) return { rows: [] };
+      const search = params?.find((p) => typeof p === 'string' && p.startsWith('%'))
+        ?.replace(/%/g, '').toLowerCase() ?? '';
+      const matches = products.filter((r) => r.name.toLowerCase().includes(search));
+      return { rows: matches };
+    });
+  }
+
+  test('"que productos tienes" después de pizza hawaiana → NO hereda pizza hawaiana', async () => {
+    const id = sid();
+
+    // Turn 1: pizza mexicana
+    mockDbByName(mockPizzaMex);
+    await processMessage({ text: 'tienes pizza mexicana', sessionId: id, businessId: BUSINESS_ID });
+
+    // Turn 2: precio (hereda contexto)
+    mockDbByName(mockPizzaMex);
+    await processMessage({ text: 'que precio tiene', sessionId: id, businessId: BUSINESS_ID });
+
+    // Turn 3: pizza hawaiana
+    mockDbByName(mockPizzaHaw);
+    await processMessage({ text: 'y pizza hawaiana', sessionId: id, businessId: BUSINESS_ID });
+
+    // Turn 4: petición general del catálogo → NOT be about pizza hawaiana
+    db.query.mockResolvedValue({ rows: [] });
+    const t4 = await processMessage({ text: 'que productos tienes', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(t4.decision.strategy).toBe('intent');
+    expect(t4.decision.intent).toBe('productos');
+    expect(t4.decision.entity.value).toBeNull();
+    expect(t4.decision.usedContext).toBe(false);
+  });
+
+  test('"que vendes" con contexto previo → catálogo general (sin herencia)', async () => {
+    const id = sid();
+
+    mockDbByName(mockPizzaHaw);
+    await processMessage({ text: 'tienes pizza hawaiana', sessionId: id, businessId: BUSINESS_ID });
+
+    db.query.mockResolvedValue({ rows: [] });
+    const t2 = await processMessage({ text: 'que vendes', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(t2.decision.strategy).toBe('intent');
+    expect(t2.decision.intent).toBe('productos');
+    expect(t2.decision.entity.value).toBeNull();
+    expect(t2.decision.usedContext).toBe(false);
+  });
+
+  test('contexto se limpia después de petición general (lastEntity=null)', async () => {
+    const id = sid();
+
+    // Establish pizza context
+    mockDbByName(mockPizzaHaw);
+    await processMessage({ text: 'tienes pizza hawaiana', sessionId: id, businessId: BUSINESS_ID });
+
+    // General catalog query
+    db.query.mockResolvedValue({ rows: [] });
+    await processMessage({ text: 'que productos tienes', sessionId: id, businessId: BUSINESS_ID });
+
+    // Context entity must be cleared
+    const ctx = await getContext(id);
+    expect(ctx.lastEntity.value).toBeNull();
+    expect(ctx.lastIntent).toBe('productos');
+  });
+
+  test('"productos disponibles" con contexto previo → catálogo general', async () => {
+    const id = sid();
+
+    mockDbByName(mockPizzaMex);
+    await processMessage({ text: 'tienes pizza mexicana', sessionId: id, businessId: BUSINESS_ID });
+
+    db.query.mockResolvedValue({ rows: [] });
+    const t2 = await processMessage({ text: 'productos disponibles', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(t2.decision.strategy).toBe('intent');
+    expect(t2.decision.intent).toBe('productos');
+    expect(t2.decision.entity.value).toBeNull();
+  });
+
+  test('"precios" ambiguo con contexto → SÍ hereda entidad (comportamiento correcto)', async () => {
+    // Verify we did NOT break the legitimate context-inheritance for precios
+    const id = sid();
+
+    mockDbByName(mockPizzaMex);
+    await processMessage({ text: 'tienes pizza mexicana', sessionId: id, businessId: BUSINESS_ID });
+
+    mockDbByName(mockPizzaMex);
+    const t2 = await processMessage({ text: 'que precio tiene', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(t2.decision.usedContext).toBe(true);
+    expect(t2.decision.entity.value).toBe('pizza mexicana');
+    expect(t2.decision.intent).toBe('precios');
+  });
 });
 
 // ─── Multi-turn scenario ──────────────────────────────────────────────────────
@@ -1823,6 +1974,159 @@ describe('Intención: descripcion', () => {
   });
 });
 
+// ─── extractFollowUpEntity: stripping de artículos ───────────────────────────
+
+describe('extractFollowUpEntity(): stripping de artículos iniciales', () => {
+  const lastEntity = { type: 'product', value: 'hamburguesa bbq' };
+
+  test('"la pizza mexicana" → "pizza mexicana" (artículo "la" eliminado)', () => {
+    expect(extractFollowUpEntity('la pizza mexicana', lastEntity)).toBe('pizza mexicana');
+  });
+
+  test('"el taco pastor" → "taco pastor" (artículo "el" eliminado)', () => {
+    expect(extractFollowUpEntity('el taco pastor', lastEntity)).toBe('taco pastor');
+  });
+
+  test('"los tacos al pastor" → "tacos al pastor" (artículo "los" eliminado)', () => {
+    expect(extractFollowUpEntity('los tacos al pastor', lastEntity)).toBe('tacos al pastor');
+  });
+
+  test('"pizza mexicana" sin artículo → sigue funcionando igual', () => {
+    expect(extractFollowUpEntity('pizza mexicana', lastEntity)).toBe('pizza mexicana');
+  });
+
+  test('"y la pizza mexicana" → "pizza mexicana" (artículo en Shape 1a)', () => {
+    expect(extractFollowUpEntity('y la pizza mexicana', lastEntity)).toBe('pizza mexicana');
+  });
+
+  test('"y el taco" → "taco" (artículo en Shape 1a)', () => {
+    expect(extractFollowUpEntity('y el taco', lastEntity)).toBe('taco');
+  });
+
+  test('mensaje solo artículo + 1 palabra → no devuelve nada inválido', () => {
+    // After stripping "la", there's only "x" - still valid (length >= 2)
+    const result = extractFollowUpEntity('la pizza', lastEntity);
+    expect(result).toBe('pizza');
+  });
+});
+
+// ─── Flujo: descripcion → follow-up con artículo → "sí" → catálogo ──────────
+
+describe('Flujo: descripcion context → follow-up con artículo → no encontrado → "sí" → catálogo', () => {
+  const BUSINESS_ID = 1;
+
+  const mockHamburguesa = {
+    id: 1,
+    name: 'Hamburguesa BBQ',
+    description: 'Con cheddar y cebolla caramelizada',
+    price: '150.00',
+    is_available: true,
+    stock_quantity: 10,
+    category: 'Burgers',
+  };
+  const mockPizzaMexicana = {
+    id: 2,
+    name: 'Pizza Mexicana',
+    description: 'Con jalapeños, elote y salsa roja',
+    price: '120.00',
+    is_available: true,
+    stock_quantity: 5,
+    category: 'Pizzas',
+  };
+
+  function mockDbByName(...products) {
+    db.query.mockImplementation(async (sql, params) => {
+      if (!sql.includes('ILIKE')) return { rows: [] };
+      const search = params?.find((p) => typeof p === 'string' && p.startsWith('%'))
+        ?.replace(/%/g, '').toLowerCase() ?? '';
+      const matches = products.filter((r) => r.name.toLowerCase().includes(search));
+      return { rows: matches };
+    });
+  }
+
+  test('follow-up "la pizza mexicana" usa el producto correcto (artículo eliminado)', async () => {
+    const id = sid();
+
+    // Turn 1: "qué contiene la hamburguesa bbq?" → establece contexto descripcion
+    mockDbByName(mockHamburguesa);
+    const t1 = await processMessage({
+      text: '¿Qué contiene la hamburguesa bbq?',
+      sessionId: id,
+      businessId: BUSINESS_ID,
+    });
+    expect(t1.decision.intent).toBe('descripcion');
+    expect(t1.replyText).toContain('Hamburguesa BBQ');
+
+    // Turn 2: "la pizza mexicana" → follow-up con artículo → debe ENCONTRAR pizza mexicana
+    mockDbByName(mockHamburguesa, mockPizzaMexicana);
+    const t2 = await processMessage({
+      text: 'la pizza mexicana',
+      sessionId: id,
+      businessId: BUSINESS_ID,
+    });
+    // Entity value should be "pizza mexicana" (NOT "la pizza mexicana")
+    expect(t2.decision.entity.value).toBe('pizza mexicana');
+    // Should NOT say "no encontré"
+    expect(t2.replyText).not.toContain('no encontr');
+    expect(t2.replyText).toContain('Pizza Mexicana');
+  });
+
+  test('follow-up con artículo pero producto NO existe → "sí" muestra catálogo', async () => {
+    const id = sid();
+
+    // Turn 1: hamburguesa en contexto
+    mockDbByName(mockHamburguesa);
+    await processMessage({
+      text: '¿Qué contiene la hamburguesa bbq?',
+      sessionId: id,
+      businessId: BUSINESS_ID,
+    });
+
+    // Turn 2: producto que no existe → "la torta de res" → no encontrado
+    db.query.mockResolvedValue({ rows: [] });
+    const t2 = await processMessage({
+      text: 'la torta de res',
+      sessionId: id,
+      businessId: BUSINESS_ID,
+    });
+    expect(t2.replyText.toLowerCase()).toContain('no encontr');
+
+    // Verify lastEntityFound=false so "sí" shows catalog
+    const ctxAfterT2 = await getContext(id);
+    expect(ctxAfterT2.lastEntityFound).toBe(false);
+
+    // Turn 3: "sí" → debe mostrar catálogo (entity null), NO re-querying la torta
+    db.query.mockResolvedValue({ rows: [] });
+    const t3 = await processMessage({ text: 'sí', sessionId: id, businessId: BUSINESS_ID });
+    expect(t3.decision.strategy).toBe('context');
+    expect(t3.decision.intent).toBe('productos');
+    expect(t3.decision.entity.value).toBeNull();
+  });
+
+  test('follow-up sin artículo y producto existente → respuesta correcta con descripción', async () => {
+    const id = sid();
+
+    // Turn 1: establecer contexto descripcion con hamburguesa
+    mockDbByName(mockHamburguesa);
+    await processMessage({
+      text: '¿Qué contiene la hamburguesa bbq?',
+      sessionId: id,
+      businessId: BUSINESS_ID,
+    });
+
+    // Turn 2: "pizza mexicana" (sin artículo) → debe encontrarla y responder
+    mockDbByName(mockHamburguesa, mockPizzaMexicana);
+    const t2 = await processMessage({
+      text: 'pizza mexicana',
+      sessionId: id,
+      businessId: BUSINESS_ID,
+    });
+    expect(t2.decision.entity.value).toBe('pizza mexicana');
+    expect(t2.replyText).not.toContain('no encontr');
+    expect(t2.replyText).toContain('Pizza Mexicana');
+  });
+});
+
 // ─── Estructura "que [entidad] tienen?" ──────────────────────────────────────
 
 describe('Estructura: que + [entidad] + tienen', () => {
@@ -2034,6 +2338,245 @@ describe('Estructura: que [intent-word] tienen → infiere intent correcto', () 
 
     expect(decision.entity.value).toBe('hamburguesas');
     expect(decision.intent).toBe('productos');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Flujo completo 2-turnos: "que venden?" → categorías → selección de categoría
+// ─────────────────────────────────────────────────────────────────────────────
+describe('Flujo catálogo → categorías → selección (2 turnos completos)', () => {
+  const BUSINESS_ID = 1;
+  const CATS = ['Pizzas', 'Hamburguesas', 'Bebidas'];
+
+  function makeProducts(n, category = 'General') {
+    return Array.from({ length: n }, (_, i) => ({
+      id: i + 1,
+      name: `Producto ${i + 1}`,
+      description: null,
+      price: String((10 + i).toFixed(2)),
+      is_available: true,
+      stock_quantity: 5,
+      category,
+    }));
+  }
+
+  /** Sets up db.query to handle ALL queries needed for the 2-turn flow. */
+  function mockDbFlow({ allProducts, catProducts, countResult = 0 }) {
+    db.query.mockImplementation(async (sql, params) => {
+      // getProductosByCategory (LIMIT/OFFSET)
+      if (sql.includes('LIMIT') && sql.includes('OFFSET')) {
+        const limit  = params?.[2] ?? 10;
+        const offset = params?.[3] ?? 0;
+        return { rows: (catProducts ?? []).slice(offset, offset + limit) };
+      }
+      // countProductosByCategory
+      if (sql.includes('COUNT(*)')) {
+        return { rows: [{ total: String(countResult) }] };
+      }
+      // getCategories
+      if (sql.includes('DISTINCT') && sql.includes('categories')) {
+        return { rows: CATS.map((c) => ({ category: c })) };
+      }
+      // Entity detection ILIKE — no entity found for category names
+      if (sql.includes('ILIKE')) return { rows: [] };
+      // getProductos (all products — trips hard limit)
+      if (sql.includes('products')) return { rows: allProducts ?? [] };
+      return { rows: [] };
+    });
+  }
+
+  test('turno 1: "que venden?" → muestra categorías; turno 2: nombre de categoría → muestra productos', async () => {
+    const id = sid();
+    const catProducts = makeProducts(8, 'Pizzas');
+    mockDbFlow({ allProducts: makeProducts(25), catProducts, countResult: 8 });
+
+    // Turno 1
+    const t1 = await processMessage({ text: 'que venden', sessionId: id, businessId: BUSINESS_ID });
+    expect(t1.replyText).toContain('Pizzas');
+    expect(t1.replyText).toContain('Hamburguesas');
+    expect(t1.replyText).toContain('Bebidas');
+
+    // Contexto guardado correctamente tras turno 1
+    const ctx1 = await getContext(id);
+    expect(ctx1.lastIntent).toBe('category_selection');
+    expect(ctx1.availableCategories).toEqual(CATS);
+
+    // Turno 2: usuario escribe el nombre exacto de la categoría
+    const t2 = await processMessage({ text: 'Pizzas', sessionId: id, businessId: BUSINESS_ID });
+    expect(t2.decision.strategy).toBe('category_select');
+    expect(t2.decision.intent).toBe('productos');
+    expect(t2.decision.entity.value).toBe('Pizzas');
+    expect(t2.replyText).toContain('Producto 1');
+  });
+
+  test('turno 2: usuario escribe categoría en minúsculas → detecta igual', async () => {
+    const id = sid();
+    await updateContext(id, {
+      lastIntent: 'category_selection',
+      availableCategories: CATS,
+    });
+    mockDbFlow({ catProducts: makeProducts(5, 'Bebidas'), countResult: 5 });
+
+    const { decision } = await processMessage({ text: 'bebidas', sessionId: id, businessId: BUSINESS_ID });
+    expect(decision.strategy).toBe('category_select');
+    expect(decision.entity.value).toBe('Bebidas');
+  });
+
+  test('turno 2: categoría con acento (Electrónica) → detecta aunque usuario omita acento', async () => {
+    const id = sid();
+    await updateContext(id, {
+      lastIntent: 'category_selection',
+      availableCategories: ['Electrónica', 'Accesorios', 'Cables'],
+    });
+    mockDbFlow({ catProducts: makeProducts(4, 'Electrónica'), countResult: 4 });
+
+    const { decision } = await processMessage({ text: 'Electronica', sessionId: id, businessId: BUSINESS_ID });
+    expect(decision.strategy).toBe('category_select');
+    expect(decision.entity.value).toBe('Electrónica');
+  });
+
+  test('turno 2: usuario escribe frase que contiene nombre de categoría → detecta', async () => {
+    const id = sid();
+    await updateContext(id, {
+      lastIntent: 'category_selection',
+      availableCategories: CATS,
+    });
+    mockDbFlow({ catProducts: makeProducts(6, 'Hamburguesas'), countResult: 6 });
+
+    const { decision } = await processMessage({ text: 'quiero ver hamburguesas', sessionId: id, businessId: BUSINESS_ID });
+    expect(decision.strategy).toBe('category_select');
+    expect(decision.entity.value).toBe('Hamburguesas');
+  });
+
+  test('turno 2: categoría con nombre largo → detecta con nombre parcial', async () => {
+    const id = sid();
+    await updateContext(id, {
+      lastIntent: 'category_selection',
+      availableCategories: ['Tornillos y Fijaciones', 'Herramientas Manuales', 'Pinturas'],
+    });
+    mockDbFlow({ catProducts: makeProducts(3, 'Tornillos y Fijaciones'), countResult: 3 });
+
+    // User types just the first word of a multi-word category
+    const { decision } = await processMessage({ text: 'tornillos', sessionId: id, businessId: BUSINESS_ID });
+    expect(decision.strategy).toBe('category_select');
+    expect(decision.entity.value).toBe('Tornillos y Fijaciones');
+  });
+
+  test('turno 2: responde con los productos de la categoría seleccionada (no fallback AI)', async () => {
+    const id = sid();
+    const catProducts = makeProducts(3, 'Bebidas');
+    await updateContext(id, {
+      lastIntent: 'category_selection',
+      availableCategories: CATS,
+    });
+    mockDbFlow({ catProducts, countResult: 3 });
+
+    const { replyText, decision } = await processMessage({ text: 'Bebidas', sessionId: id, businessId: BUSINESS_ID });
+
+    expect(decision.strategy).not.toBe('ai');
+    expect(replyText).not.toMatch(/no estoy seguro/i);
+    expect(replyText).toContain('Producto 1');
+  });
+
+  test('flujo completo con "¿qué tienen?" → categorías → selección', async () => {
+    const id = sid();
+    const catProducts = makeProducts(5, 'Hamburguesas');
+    mockDbFlow({ allProducts: makeProducts(30), catProducts, countResult: 5 });
+
+    // Turno 1
+    const t1 = await processMessage({ text: '¿qué tienen?', sessionId: id, businessId: BUSINESS_ID });
+    expect(t1.replyText).toContain('Hamburguesas');
+
+    const ctx = await getContext(id);
+    expect(ctx.lastIntent).toBe('category_selection');
+
+    // Turno 2
+    const t2 = await processMessage({ text: 'Hamburguesas', sessionId: id, businessId: BUSINESS_ID });
+    expect(t2.decision.strategy).toBe('category_select');
+    expect(t2.replyText).toContain('Producto 1');
+  });
+});
+
+// ─── Flujo catálogo → categorías con Redis caído ─────────────────────────────
+
+describe('Flujo catálogo → categorías con Redis caído', () => {
+  const BUSINESS_ID = 1;
+  const CATS = ['Pizzas', 'Hamburguesas', 'Bebidas'];
+
+  function makeProducts(n, category = 'General') {
+    return Array.from({ length: n }, (_, i) => ({
+      id: i + 1,
+      name: `Producto ${i + 1}`,
+      description: null,
+      price: String((10 + i).toFixed(2)),
+      is_available: true,
+      stock_quantity: 5,
+      category,
+    }));
+  }
+
+  function mockDbFlow({ allProducts, catProducts, countResult = 0 }) {
+    db.query.mockImplementation(async (sql, params) => {
+      if (sql.includes('LIMIT') && sql.includes('OFFSET')) {
+        const limit  = params?.[2] ?? 10;
+        const offset = params?.[3] ?? 0;
+        return { rows: (catProducts ?? []).slice(offset, offset + limit) };
+      }
+      if (sql.includes('COUNT(*)')) {
+        return { rows: [{ total: String(countResult) }] };
+      }
+      if (sql.includes('DISTINCT') && sql.includes('categories')) {
+        return { rows: CATS.map((c) => ({ category: c })) };
+      }
+      if (sql.includes('ILIKE')) return { rows: [] };
+      if (sql.includes('products')) return { rows: allProducts ?? [] };
+      return { rows: [] };
+    });
+  }
+
+  afterEach(() => {
+    // Restaurar el mock de Redis al comportamiento normal
+    mockRedisInstance.get.mockImplementation(async (key) => store.get(key) ?? null);
+    mockRedisInstance.setex.mockImplementation(async (key, _ttl, val) => { store.set(key, val); return 'OK'; });
+  });
+
+  test('con Redis caído, "qué venden → nombre de categoría" funciona vía fallback en memoria', async () => {
+    const id = sid();
+    const catProducts = makeProducts(5, 'Pizzas');
+    mockDbFlow({ allProducts: makeProducts(25), catProducts, countResult: 5 });
+
+    mockRedisInstance.get.mockRejectedValue(new Error('Connection is closed.'));
+    mockRedisInstance.setex.mockRejectedValue(new Error('Connection is closed.'));
+
+    // Turno 1: muestra categorías
+    const t1 = await processMessage({ text: 'que venden', sessionId: id, businessId: BUSINESS_ID });
+    expect(t1.replyText).toContain('Pizzas');
+    expect(t1.replyText).toContain('Hamburguesas');
+    expect(t1.replyText).toContain('Bebidas');
+
+    // Turno 2: selecciona categoría — NO debe ir a AI fallback
+    const t2 = await processMessage({ text: 'Pizzas', sessionId: id, businessId: BUSINESS_ID });
+    expect(t2.decision.strategy).toBe('category_select');
+    expect(t2.decision.entity.value).toBe('Pizzas');
+    expect(t2.replyText).toContain('Producto 1');
+    expect(t2.replyText).not.toMatch(/no estoy seguro/i);
+  });
+
+  test('con Redis caído, categoría en minúsculas también es detectada', async () => {
+    const id = sid();
+    const catProducts = makeProducts(4, 'Bebidas');
+    mockDbFlow({ allProducts: makeProducts(25), catProducts, countResult: 4 });
+
+    mockRedisInstance.get.mockRejectedValue(new Error('Connection is closed.'));
+    mockRedisInstance.setex.mockRejectedValue(new Error('Connection is closed.'));
+
+    // Turno 1
+    await processMessage({ text: 'que tienen', sessionId: id, businessId: BUSINESS_ID });
+
+    // Turno 2: minúsculas
+    const t2 = await processMessage({ text: 'bebidas', sessionId: id, businessId: BUSINESS_ID });
+    expect(t2.decision.strategy).toBe('category_select');
+    expect(t2.replyText).not.toMatch(/no estoy seguro/i);
   });
 });
 

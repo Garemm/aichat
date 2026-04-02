@@ -45,63 +45,99 @@ function sessionKey(sessionId) {
 const EMPTY_CONTEXT = {
   lastIntent: null,
   lastEntity: { type: null, value: null },
+  lastAttributes: null,
   updatedAt: null,
 };
 
+// ─── In-memory fallback ──────────────────────────────────────────────────────
+// Preserves session context within the process during transient Redis outages.
+// Writing to memory happens BEFORE the Redis call so context is never lost even
+// when Redis.setex throws.
+
+const _memStore = new Map();
+
+function _memGet(key) {
+  const entry = _memStore.get(key);
+  if (!entry) return null;
+  if (entry.expiresAt < Date.now()) {
+    _memStore.delete(key);
+    return null;
+  }
+  return entry.value;
+}
+
+function _memSet(key, value) {
+  if (_memStore.size >= 1000) {
+    // Evict the oldest entry to prevent unbounded growth
+    _memStore.delete(_memStore.keys().next().value);
+  }
+  _memStore.set(key, { value, expiresAt: Date.now() + SESSION_TTL_SECONDS * 1000 });
+}
+
+// ─── Context parsing / migration ─────────────────────────────────────────────
+
+function _parseContext(raw) {
+  const parsed = JSON.parse(raw);
+  // Migrate old format: { lastProduct, lastEntities } → { lastEntity: { type, value } }
+  if (parsed.lastProduct !== undefined && parsed.lastEntity === undefined) {
+    parsed.lastEntity = parsed.lastProduct
+      ? { type: 'product', value: parsed.lastProduct }
+      : { type: null, value: null };
+    delete parsed.lastProduct;
+    delete parsed.lastEntities;
+  }
+  // Ensure lastEntity always has the right shape
+  if (!parsed.lastEntity || typeof parsed.lastEntity !== 'object') {
+    parsed.lastEntity = { type: null, value: null };
+  }
+  return parsed;
+}
+
+// ─── Public API ───────────────────────────────────────────────────────────────
+
 /**
  * Recupera el contexto de una sesión desde Redis.
- *
- * Si la clave no existe (sesión nueva o TTL expirado) devuelve un objeto
- * con todos los campos en null — el pipeline lo trata como sesión sin historial.
+ * Si Redis no está disponible, utiliza el fallback en memoria del proceso.
  *
  * @param {string} sessionId  UUID generado en el frontend (sessionStorage)
- * @returns {Promise<{
- *   lastIntent:  string|null,
- *   lastEntity:  { type: string|null, value: string|null },
- *   updatedAt:   string|null
- * }>}
+ * @returns {Promise<object>}
  */
 async function getContext(sessionId) {
+  const key = sessionKey(sessionId);
   try {
-    const raw = await redis.get(sessionKey(sessionId));
+    const raw = await redis.get(key);
     if (!raw) {
+      // Redis returned null: key doesn't exist or TTL expired — respect that and
+      // return empty. Memory fallback is NOT used here because null is a valid
+      // "no session" response from Redis (not an error).
       return { ...EMPTY_CONTEXT };
     }
-    const parsed = JSON.parse(raw);
-    // Migrate old format: { lastProduct, lastEntities } → { lastEntity: { type, value } }
-    if (parsed.lastProduct !== undefined && parsed.lastEntity === undefined) {
-      parsed.lastEntity = parsed.lastProduct
-        ? { type: 'product', value: parsed.lastProduct }
-        : { type: null, value: null };
-      delete parsed.lastProduct;
-      delete parsed.lastEntities;
-    }
-    // Ensure lastEntity always has the right shape
-    if (!parsed.lastEntity || typeof parsed.lastEntity !== 'object') {
-      parsed.lastEntity = { type: null, value: null };
-    }
+    const parsed = _parseContext(raw);
+    // Keep memory in sync so it stays current for outage fallback
+    _memSet(key, raw);
     return parsed;
   } catch (err) {
     console.warn('[Context] Error al leer contexto Redis:', err.message);
+    // Redis threw (connection down / unavailable) — serve from in-memory fallback
+    const memRaw = _memGet(key);
+    if (memRaw) {
+      try { return _parseContext(memRaw); } catch { /* corrupt entry — fall through */ }
+    }
     return { ...EMPTY_CONTEXT };
   }
 }
 
 /**
- * Guarda o actualiza el contexto de la sesión en Redis.
- *
- * Hace MERGE sobre el contexto previo para no perder campos que no se
- * modifican en el turno actual.
- * SETEX renueva el TTL con cada interacción activa.
+ * Guarda o actualiza el contexto de la sesión.
+ * Siempre escribe en memoria primero; luego intenta persistir en Redis.
+ * Si Redis falla, el contexto queda disponible en el fallback en memoria.
  *
  * @param {string} sessionId
- * @param {{
- *   lastIntent?:  string|null,
- *   lastEntity?:  { type: string|null, value: string|null }
- * }} data  Campos a actualizar (parcial)
+ * @param {object} data  Campos a actualizar (merge parcial)
  * @returns {Promise<void>}
  */
 async function updateContext(sessionId, data) {
+  const key = sessionKey(sessionId);
   try {
     const current = await getContext(sessionId);
     const updated = {
@@ -109,10 +145,15 @@ async function updateContext(sessionId, data) {
       ...data,
       updatedAt: new Date().toISOString(),
     };
-    await redis.setex(sessionKey(sessionId), SESSION_TTL_SECONDS, JSON.stringify(updated));
+    const serialized = JSON.stringify(updated);
+    // Write to memory FIRST — survives Redis failure
+    _memSet(key, serialized);
+    // Then persist to Redis (may throw if unavailable)
+    await redis.setex(key, SESSION_TTL_SECONDS, serialized);
   } catch (err) {
     console.warn('[Context] Error al guardar contexto Redis:', err.message);
+    // In-memory write already completed — context is preserved in the process
   }
 }
 
-module.exports = { getContext, updateContext, EMPTY_CONTEXT };
+module.exports = { getContext, updateContext, EMPTY_CONTEXT, SESSION_TTL_SECONDS };

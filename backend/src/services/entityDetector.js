@@ -5,10 +5,11 @@
  *
  * ENTITY DETECTOR — Multi-type entity extraction from user messages.
  *
- * Detects three entity types:
+ * Detects four entity types:
  *   - product:   a specific product name ("laptop gamer", "hamburguesa doble")
  *   - category:  a product category ("herramientas", "bebidas", "cuadernos")
  *   - promotion: a reference to a specific promotion ("2x1 en pizzas")
+ *   - attribute: a semantic attribute query ("algo con queso", "para madera")
  *
  * DESIGN:
  *   - Does NOT hardcode product/category names — queries the DB dynamically
@@ -20,11 +21,13 @@
  *   Runs AFTER intentDetector. The intent result helps disambiguate:
  *   - "tienen descuentos?" → intent=promociones, entity=null (no specific promo)
  *   - "tienen laptop?"     → intent=null (no strong phrase), entity=product:"laptop"
+ *   - "algo con queso?"     → intent=productos, entity=attribute:"queso"
  */
 
 const nlp = require('compromise');
 const db  = require('../config/database');
 const { normalize, toSingular, wordVariants } = require('./normalize');
+const { extractAttribute } = require('./attributeExtractor');
 
 // ─── Stopwords ────────────────────────────────────────────────────────────────
 
@@ -100,53 +103,53 @@ function hasProductTrigger(normalizedText) {
 
 const PRODUCT_QUERY_PATTERNS = [
   // "cuantas/cuantos X tienes/tienen/hay" — verb AFTER entity
-  /cu[ae]n(?:to|ta)s?\s+(?:de\s+)?(?<entity>[\w\s]+?)\s+(?:tienes?|tienen|hay)(?:\?|$)/,
-  /tienen\s+disponible\s+(?<entity>[\w\s]+?)(?:\?|$)/,
-  /hay\s+disponibilidad\s+de\s+(?<entity>[\w\s]+?)(?:\?|$)/,
-  /cu[ae]nto\s+(?:cuesta|vale|sale|cobran\s+por)\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
+  /cu[ae]n(?:to|ta)s?\s+(?:de\s+)?(?<entity>[\wñ\s]+?)\s+(?:tienes?|tienen|hay)(?:\?|$)/,
+  /tienen\s+disponible\s+(?<entity>[\wñ\s]+?)(?:\?|$)/,
+  /hay\s+disponibilidad\s+de\s+(?<entity>[\wñ\s]+?)(?:\?|$)/,
+  /cu[ae]nto\s+(?:cuesta|vale|sale|cobran\s+por)\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
   // "que precio tiene la hamburguesa" / "cual es el precio de la pizza"
-  /(?:que\s+|cual\s+es\s+(?:el\s+)?)?precio\s+(?:tiene[n]?|cuesta|cobran|vale|sale)\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
+  /(?:que\s+|cual\s+es\s+(?:el\s+)?)?precio\s+(?:tiene[n]?|cuesta|cobran|vale|sale)\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
   // "precio hamburguesa" / "precio agua de horchata" (bare price query, starts with "precio")
-  /^precio\s+(?:de\s+)?(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
-  /precio\s+de\s+(?:el\s+|la\s+|los\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
-  /me\s+(?:pueden\s+dar|das?|traes?)\s+(?:el\s+|la\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
+  /^precio\s+(?:de\s+)?(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
+  /precio\s+de\s+(?:el\s+|la\s+|los\s+|un\s+|una\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
+  /me\s+(?:pueden\s+dar|das?|traes?)\s+(?:el\s+|la\s+|un\s+|una\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
   // "puedes decirme si tienen X" / "me puedes decir si tienen X"
-  /(?:me\s+)?puedes?\s+(?:decirme\s+)?(?:si\s+)?(?:tienen?|hay)\s+(?<entity>[\w\s]+?)(?:\?|$)/,
+  /(?:me\s+)?puedes?\s+(?:decirme\s+)?(?:si\s+)?(?:tienen?|hay)\s+(?<entity>[\wñ\s]+?)(?:\?|$)/,
   // Availability phrases
-  /esta(?:s|n)?\s+disponible[s]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
-  /hay\s+stock\s+de\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
-  /tiene(?:s|n)?\s+disponibilidad\s+(?:de\s+)?(?:el\s+|la\s+|los\s+|las\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
+  /esta(?:s|n)?\s+disponible[s]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
+  /hay\s+stock\s+de\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
+  /tiene(?:s|n)?\s+disponibilidad\s+(?:de\s+)?(?:el\s+|la\s+|los\s+|las\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
   // "que tipo(s) de X tienen/tienes/tiene/hay" — entity inside "que tipo de … verb"
   // MUST appear before the generic "que X tienen" pattern below.
-  /^que\s+tipos?\s+de\s+(?<entity>[\w]+(?:\s+[\w]+){0,3})\s+(?:tiene[sn]?|tienen|hay)\s*\??$/,
-  /que\s+tipos?\s+de\s+(?<entity>[\w]+(?:\s+[\w]+){0,3})\s+(?:tiene[sn]?|tienen|hay)/,
+  /^que\s+tipos?\s+de\s+(?<entity>[\wñ]+(?:\s+[\wñ]+){0,3})\s+(?:tiene[sn]?|tienen|hay)\s*\??$/,
+  /que\s+tipos?\s+de\s+(?<entity>[\wñ]+(?:\s+[\wñ]+){0,3})\s+(?:tiene[sn]?|tienen|hay)/,
   // "que [entity] tienen/tienes/hay?" — entity BETWEEN "que" and trailing verb.
   // Must run BEFORE the generic tiene[sn]? pattern which would otherwise grab
   // whatever follows "tienen" (e.g. "disponibles") as the entity.
   // Distinct from description patterns where verb follows IMMEDIATELY after "que".
-  /^que\s+(?<entity>[\w]+(?:\s+[\w]+){0,4})\s+(?:tiene[sn]?|tienen|hay)\s*(?:[\w]+\s*)?\??$/,
-  /tiene[sn]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
-  /hay\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
-  /existe[n]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
-  /busco\s+(?:un\s+|una\s+|el\s+|la\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
-  /quiero\s+(?:un\s+|una\s+|el\s+|la\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
-  /me\s+interesa\s+(?:el\s+|la\s+|los\s+|las\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
-  /info(?:rmacion)?\s+(?:de\s+)?(?:el\s+|la\s+|los\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
-  /vende[ns]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
-  /ofrece[ns]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
-  /necesito\s+(?:un\s+|una\s+|el\s+|la\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
+  /^que\s+(?<entity>[\wñ]+(?:\s+[\wñ]+){0,4})\s+(?:tiene[sn]?|tienen|hay)\s*(?:[\wñ]+\s*)?\??$/,
+  /tiene[sn]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
+  /hay\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
+  /existe[n]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
+  /busco\s+(?:un\s+|una\s+|el\s+|la\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
+  /quiero\s+(?:un\s+|una\s+|el\s+|la\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
+  /me\s+interesa\s+(?:el\s+|la\s+|los\s+|las\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
+  /info(?:rmacion)?\s+(?:de\s+)?(?:el\s+|la\s+|los\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
+  /vende[ns]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
+  /ofrece[ns]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
+  /necesito\s+(?:un\s+|una\s+|el\s+|la\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
   // Reversed-order: entity before verb — "X tienes?" / "X hay?"
-  /(?<entity>[\w]+(?:\s+[\w]+){0,3})\s+(?:tienes?|tienen|hay)\s*\?$/,
+  /(?<entity>[\wñ]+(?:\s+[\wñ]+){0,3})\s+(?:tienes?|tienen|hay)\s*\?$/,
   // Description-intent phrases: "que contiene X", "que incluye X", "que trae X"
   // singular and plural forms, optional article el/la/los/las before entity
-  /(?:que\s+)?contiene[n]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+|este\s+|esta\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
-  /(?:que\s+)?incluye[n]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+|este\s+|esta\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
-  /(?:que\s+)?trae[n]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+|este\s+|esta\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
-  /de\s+que\s+esta[n]?\s+hech[oa]s?\s+(?:el\s+|la\s+|los\s+|las\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
+  /(?:que\s+)?contiene[n]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+|este\s+|esta\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
+  /(?:que\s+)?incluye[n]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+|este\s+|esta\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
+  /(?:que\s+)?trae[n]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+|este\s+|esta\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
+  /de\s+que\s+esta[n]?\s+hech[oa]s?\s+(?:el\s+|la\s+|los\s+|las\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
   // "que tiene/tienen los/las X" — description of entity with article
-  /que\s+tiene[n]?\s+(?:el\s+|la\s+|los\s+|las\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
+  /que\s+tiene[n]?\s+(?:el\s+|la\s+|los\s+|las\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
   // "caracteristicas de X" / "especificaciones de X" / "descripcion de X"
-  /(?:caracteristicas|especificaciones|descripcion)\s+(?:de[l]?\s+)?(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)(?:\?|$)/,
+  /(?:caracteristicas|especificaciones|descripcion)\s+(?:de[l]?\s+)?(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
 ];
 
 // ─── Entity candidate cleanup ────────────────────────────────────────────────
@@ -317,6 +320,19 @@ async function detectEntities(message, businessId, intentResult = { intent: null
   const empty = { product: null, category: null, promotion: null, type: null, value: null };
 
   const normalizedText = normalize(message);
+
+  // ── Attribute query (highest priority for "algo con X", "para X", etc.) ─────
+  // Must run before candidate extraction so "algo con queso" isn't mis-routed
+  // as a generic product query for the word "queso".
+  const attrExtracted = extractAttribute(normalizedText);
+  if (attrExtracted) {
+    return {
+      ...empty,
+      type: 'attribute',
+      value: attrExtracted.value,
+      attributeType: attrExtracted.type,
+    };
+  }
 
   // ── "que tipo(s) de X tienen" — check category first, then product ──────────
   // This pattern signals the user wants a type/kind of product, so a category

@@ -1,6 +1,6 @@
 # LLM Chat AI — Documentación del Proyecto
 
-> Última actualización: 1 de abril de 2026 — Sprint 13 (flujo híbrido IA + correcciones de enrutamiento)
+> Última actualización: 2 de abril de 2026 — Sprint 16 (atributos de producto, servicios del negocio, correcciones de flujo conversacional)
 > Estado: desarrollo activo
 
 ---
@@ -15,11 +15,15 @@ El usuario escribe mensajes en español coloquial a través de una interfaz Reac
 - Responde preguntas sobre horarios (general y por día de la semana, con formas verbales "abres", "cierras")
 - Lista productos con precio, disponibilidad y stock; pagina resultados si hay demasiados
 - Muestra productos por categoría o tipo ("que bebidas tienen", "que tipo de hamburguesas tienen")
-- Informa precios de productos específicos
+- Informa precios de productos específicos; añade sección de características (`product_attributes`) cuando el producto tiene atributos registrados
+- Muestra descripción de productos con sus características (`product_attributes`)
+- Lista los servicios del negocio (`business_services`) con precio; también los incluye al preguntar por la ubicación
+- Responde información detallada de un servicio específico (descripción + precio)
 - Muestra promociones vigentes y ubicación del negocio
 - Mantiene contexto multi-turno ("¿y cuánto cuesta?" después de preguntar por un producto)
+- Preguntas generales sobre el catálogo ("que productos tienes", "que vendes") resetean el contexto previo de producto — nunca heredan la entidad anterior
 - **Flujo híbrido IA:** recomendaciones ("que me recomiendas"), comparaciones ("X vs Y"), superlativos ("la más barata", "la mejor"), preguntas de capacidad nutricional — ruteados a OpenAI con contexto RAG filtrado
-- Degrada elegantemente si Redis no está disponible (continúa sin contexto)
+- Degrada elegantemente si Redis no está disponible (in-memory fallback automático)
 
 ---
 
@@ -69,6 +73,9 @@ aichat/
 │   │   │   ├── index.js
 │   │   │   └── messageRoutes.js
 │   │   ├── services/
+│   │   │   ├── aiDecisionEngine.js
+│   │   │   ├── attributeExtractor.js
+│   │   │   ├── attributeSearchService.js
 │   │   │   ├── businessInfoService.js
 │   │   │   ├── conversationalContext.js
 │   │   │   ├── dayDetector.js
@@ -79,10 +86,9 @@ aichat/
 │   │   │   ├── messageService.js
 │   │   │   ├── nlpEntityExtractor.js
 │   │   │   ├── normalize.js
+│   │   │   ├── ragFilterService.js
 │   │   │   ├── sessionContextService.js
-│   │   │   ├── textPreprocessor.js
-│   │   │   ├── aiDecisionEngine.js
-│   │   │   └── ragFilterService.js
+│   │   │   └── textPreprocessor.js
 │   │   ├── sockets/
 │   │   │   └── chatSocket.js
 │   │   └── temp/
@@ -98,6 +104,7 @@ aichat/
 │           ├── intentResponseFormatter.test.js
 │           ├── intentService.test.js
 │           ├── keywordResponses.test.js
+│           ├── attributeSearch.test.js
 │           ├── messageModel.test.js
 │           ├── mockOpenAI.test.js
 │           ├── nlpEntityExtractor.test.js
@@ -276,7 +283,13 @@ Mensaje: "abren el lunes?"   sessionId: "a3f2..."
         │    │   Para tipo='product' o tipo='category' infiere                 │
         │    │   intent='productos' si no hay intent en el mensaje             │
         │    │                                                                 │
-        │    │ Regla 3: intent no-standalone + entity en contexto              │
+        │    │ Regla 2.5: intent=productos + score≥3 + sin entidad            │
+        │    │   Consulta general del catálogo → strategy: 'intent'           │
+        │    │   NUNCA hereda lastEntity del contexto                          │
+        │    │   Limpia lastEntity en Redis al completar                       │
+        │    │                                                                 │
+        │    │ Regla 3: intent no-standalone (precios, descripcion…)           │
+        │    │           + entity en contexto                                  │
         │    │   → strategy: 'context'  (combina intent + lastEntity)         │
         │    │                                                                 │
         │    │ Regla 4: mensaje ambiguo + contexto disponible                  │
@@ -328,6 +341,10 @@ Mensaje: "abren el lunes?"   sessionId: "a3f2..."
         │
         │    Entidad producto en mensaje:
         │      → queryProducts → formatProductResponse(entity, rows)
+        │      → si rows.length === 1:
+        │           getProductAttributes([rows[0].id])
+        │           → formatProductAttributes(attrsMap, id)
+        │           → se añade sección "✨ Características:" al final
         │
         │    Intent puro (incluye hard-limit de productos):
         │      → getBusinessInfoByIntent(intent, businessId)
@@ -335,7 +352,25 @@ Mensaje: "abren el lunes?"   sessionId: "a3f2..."
         │           getCategories(businessId)
         │           formatCategoryPrompt(categories)
         │           → "Tenemos muchos productos… ¿Buscas algo en específico?"
+        │      → si intent === 'servicios' + entity.value:
+        │           getServiceByName(businessId, entity.value)
+        │           → formatServiceDetail(service)
+        │      → si intent === 'servicios' (general):
+        │           getBusinessInfoByIntent('servicios', businessId)
+        │           → formatIntentResponse('servicios', rows)
+        │      → si intent === 'ubicacion':
+        │           formatIntentResponse('ubicacion', row)
+        │           + getBusinessInfoByIntent('servicios', businessId)
+        │           → se añade lista de servicios activos al final
         │      → sino: formatIntentResponse(intent, data)
+        │
+        │    Precio de producto con intent=precios + entity.type='product':
+        │      → queryProducts → "El producto *X* cuesta $Y."
+        │      → getProductAttributes([p.id]) → sección "✨ Características:"
+        │
+        │    Descripción con intent=descripcion + entity.value:
+        │      → queryProducts → formatDescripcionResponse(entity, rows)
+        │      → getProductAttributes([rows[0].id]) → sección "✨ Características:"
         │
         ▼ 7b. handleAIFallback(...)  [usado cuando strategy === 'ai']
         │
@@ -376,6 +411,11 @@ Mensaje: "abren el lunes?"   sessionId: "a3f2..."
 | 13 | "que me recomiendas de postres?" | Regla 1.5 (AI prescreen) | ai→RAG | Recomendación de IA con datos filtrados de Postres |
 | 14 | "cual es la pizza más barata?" | Regla 1.5 (AI prescreen) | ai→RAG | Comparación/ranking de pizzas por precio |
 | 15 | "que pizza es la mejor?" | Regla 1.5 (AI prescreen) | ai→RAG | Recomendación subjetiva con contexto de BD |
+| 16 | "que servicios tienen?" | Regla 1 (standalone) | intent | Lista de servicios con precios |
+| 17 | "y el servicio a domicilio?" | Regla 5 (follow-up) | followup | Nombre + descripción + precio del servicio |
+| 18 | "donde están ubicados?" | Regla 1 (standalone) | intent | Ubicación + lista de servicios activos del negocio |
+| 19 | "que productos tienes" (con ctx pizza) | Regla 2.5 (catálogo general) | intent | Catálogo/categorías; entity de contexto ignorada |
+| 20 | "la pizza mexicana" (follow-up) | Regla 5 (follow-up) | followup | Info de pizza mexicana (artículo "la" eliminado) |
 
 ---
 
@@ -412,11 +452,15 @@ Backend genera replyText
 **Orquestador principal del sistema NLP.** Reemplaza la lógica que antes estaba en `chatSocket.js`. Exporta `processMessage({ text, sessionId, businessId })` que ejecuta todos los pasos del pipeline y retorna `{ replyText, decision, logs }`.
 
 Contiene además las funciones puras exportadas para testing:
-- `decide(intentResult, entityResult, context, normalizedText)` → aplica las 9+ reglas y devuelve `PipelineDecision`. La Regla 1.5 llama a `shouldUseAI()` con la entidad real detectada para que patrones de recomendación/comparación/superlativo ruteen a IA aunque haya entidad en el mensaje. La Regla 2 infiere `intent='productos'` tanto para entidades de tipo `product` como `category`.
-- `handleAIFallback(originalText, normalizedText, businessId, intentResult, entityResult, context)` → flujo híbrido IA: keyword → shouldUseAI → filterRelevantData → hasRelevantData → getRAGOpenAIResponse
-- `buildContextUpdate(decision)` → calcula el objeto parcial a persistir en Redis
+- `decide(intentResult, entityResult, context, normalizedText)` → aplica las 10+ reglas y devuelve `PipelineDecision`.
+  - Regla 1.5: llama a `shouldUseAI()` con la entidad real detectada antes que la Regla 2 para que patrones de recomendación/comparación/superlativo ruteen a IA aunque haya entidad en el mensaje.
+  - Regla 2: infiere `intent='productos'` para entidades de tipo `product` y `category`.
+  - **Regla 2.5** *(nueva)*: si `intent=productos` + `score ≥ 3` + sin entidad → `strategy=intent` sin heredar contexto (reset de catálogo general).
+  - Regla 4: cuando `lastEntityFound === false`, el intent se fuerza a `'productos'` para que un "sí" muestre el catálogo en lugar de re-preguntar por el producto fallido.
+- `handleAIFallback(...)` → flujo híbrido IA: keyword → shouldUseAI → filterRelevantData → hasRelevantData → getRAGOpenAIResponse
+- `buildContextUpdate(decision)` → calcula el objeto parcial a persistir en Redis. **Nuevo:** consultas generales de catálogo (`strategy=intent, intent=productos`) limpian `lastEntity` en Redis.
 - `isAmbiguous(normalizedText)` → `true` para mensajes cortos o patrones de seguimiento
-- `extractFollowUpEntity(normalizedText, lastEntity)` → detecta "¿Y X?" cuando hay track activo
+- `extractFollowUpEntity(normalizedText, lastEntity)` → detecta "¿Y X?", "la pizza mexicana", "tambien X" cuando hay track activo. **Actualizado:** artículos iniciales (`el/la/los/las/un/una`) son eliminados del candidato extraído antes de la consulta DB. `lastEntityFound = false` ahora se propaga también cuando el miss ocurre en rutas `followup`/`context`.
 - Constantes de paginación: `PRODUCTS_HARD_LIMIT = 20`, `PAGE_SIZE = 10`
 
 En `executeDecision()`, las entidades de tipo `category` activan el mismo flujo de paginación que la selección manual de categoría: carga la primera página de 10 productos, guarda el estado de paginación en Redis y permite continuar con "ver más".
@@ -443,6 +487,20 @@ Función principal: `shouldUseAI(normalizedText, intentResult, entityResult, con
 12. Default → `backend` (saludos, "gracias", etc.)
 
 Exporta: `shouldUseAI`, `hasRelevantData`, `LONG_MESSAGE_WORDS`, `MULTI_INTENT_SCORE_GAP`
+
+### `attributeSearchService.js`
+Motor de búsqueda semántica por atributos de producto. Permite responder preguntas del tipo "algo con queso", "para madera", "que tenga wifi" usando la tabla `product_attributes`.
+
+- `buildAttributeConditions(attributes[])` — genera cláusulas SQL `EXISTS (SELECT 1 FROM product_attributes…)` para cada atributo detectado
+- `searchByAttributes(attributes[], businessId)` — ejecuta la query combinada (OR/AND según la lista) y devuelve productos que cumplan los criterios
+- `formatAttributeResponse(products[])` — formatea la lista de resultados en bullet points
+
+Exporta: `searchByAttributes`, `formatAttributeResponse`, `buildAttributeConditions`
+
+### `attributeExtractor.js`
+Extrae atributos de búsqueda de frases en español. Detecta términos como "con queso", "para madera", "que tenga wifi" con regex por tipo de atributo (`ingredient`, `material`, `feature`, `purpose`).
+
+- `extractAttribute(normalizedText)` — retorna `{ value, type } | null`
 
 ### `ragFilterService.js`
 **Filtro RAG (Retrieval-Augmented Generation).** Cuando el pipeline decide usar IA, este servicio trae de la BD sólo los datos relevantes antes de armar el prompt para OpenAI. Minimiza tokens y coste.
@@ -494,11 +552,18 @@ Extrae entidades de tipo `product` o `category` del mensaje usando:
 Scoring de keywords contra `intents.js`. Cada keyword tiene un `weight`. El intent ganador es el de mayor suma de pesos, si supera `MIN_CONFIDENCE = 1`. Exporta `isStandaloneIntent(key)` para distinguir intents que no necesitan entidad (`horarios`, `ubicacion`, `promociones`).
 
 ### `intents.js`
-Árbol de 5 intenciones. Cada intent incluye `standalone: bool` y `keywords[]` con `{ phrase, weight }`. Los pesos tipicamente son 1–3; frases muy específicas como `"abren toda la semana"` tienen peso 3 para ganar siempre sobre palabras sueltas.
+Árbol de 6 intenciones. Cada intent incluye `standalone: bool` y `keywords[]` con `{ phrase, weight }`. Los pesos tipicamente son 1–3; frases muy específicas como `"abren toda la semana"` tienen peso 3 para ganar siempre sobre palabras sueltas.
 
-**Intents disponibles:** `horarios`, `productos`, `precios`, `promociones`, `ubicacion`
+**Intents disponibles:** `horarios`, `productos`, `precios`, `promociones`, `ubicacion`, `servicios`
 
-El intent `productos` incluye las keywords `"que tipo de"` (weight 2) y `"que tipos de"` (weight 2) para que preguntas del estilo `"que tipo de hamburguesas tienen"` sean detectadas correctamente antes del fallback de entidad.
+| Intent | standalone | Notas |
+|--------|-----------|-------|
+| `horarios` | `true` | Incluye formas tuteo: `abres`, `cierras`, `cuando abres` |
+| `productos` | `false` | `productos disponibles` (w2), `ver catalogo` (w2), `productos` (w1) — evita fallos al responder al menú del bot |
+| `precios` | `false` | Hereda entidad de contexto cuando no hay producto en el mensaje |
+| `promociones` | `true` | |
+| `ubicacion` | `true` | |
+| `servicios` | `true` | `que servicios ofrecen/tienen/manejan` (w3), `servicios disponibles` (w2), `servicios`/`servicio` (w1). Estas frases fueron **movidas** desde `productos` donde causaban conflicto de enrutamiento. |
 
 ### `intentResponseFormatter.js`
 Formateadores que convierten filas de la BD en texto con `\n`. Usa el helper interno `formatList(title, items)` que produce:
@@ -507,7 +572,18 @@ Formateadores que convierten filas de la BD en texto con `\n`. Usa el helper int
 título\n\n• item 1\n• item 2\n• item N
 ```
 
-Un formateador por intent en el objeto `FORMATTERS`. Exporta además `formatHorarioDay(dayKey, row)` para respuestas de un día específico y `formatList` para reuso externo.
+Un formateador por intent en el objeto `FORMATTERS`. Exporta:
+
+| Función | Uso |
+|---------|-----|
+| `formatIntentResponse(intent, data)` | Despacha al formateador de `FORMATTERS[intent]` |
+| `formatHorarioDay(dayKey, row)` | Horario de un día específico |
+| `formatList(title, items)` | Bullet list reutilizable |
+| `formatDescripcionResponse(entity, rows)` | Descripción de producto |
+| `formatProductAttributes(attrsMap, productId)` | Sección "✨ Características:" con atributos clave/valor. Devuelve `''` si el producto no tiene atributos. |
+| `formatServiceDetail(service)` | Tarjeta de un servicio específico: nombre + precio + descripción |
+
+El `FORMATTERS` incluye `servicios(rows)` que genera una lista con precios e invita a preguntar por un servicio específico.
 
 ### `businessModel.js`
 Queries SQL por intent + `business_id`. Métodos actuales:
@@ -523,33 +599,42 @@ Queries SQL por intent + `business_id`. Métodos actuales:
 | `getPrecios` | `name, price ORDER BY price ASC` |
 | `getPromociones` | `promotions WHERE end_date >= CURRENT_DATE` |
 | `getUbicacion` | `businesses WHERE id = $1` |
+| `getProductAttributes(productIds[])` | `product_attributes WHERE product_id IN (…)` — devuelve mapa agrupado por `product_id` |
+| `getServices(businessId)` | `business_services WHERE business_id = $1 ORDER BY name` |
+| `getServiceByName(businessId, name)` | `business_services WHERE name ILIKE '%name%' LIMIT 5` |
 
 ### `businessInfoService.js`
-Despacha intent → `BusinessModel` via `QUERY_MAP`. Exporta también `getHorariosByDay`, `getCategories`, `getProductosByCategory` y `countProductosByCategory` para uso directo en `messagePipeline`.
+Despacha intent → `BusinessModel` via `QUERY_MAP`. El `QUERY_MAP` incluye los seis intents: `horarios`, `productos`, `precios`, `promociones`, `ubicacion`, `servicios`.
+
+Exporta también: `getHorariosByDay`, `getCategories`, `getProductosByCategory`, `countProductosByCategory`, `getProductAttributes(productIds[])`, `getServiceByName(businessId, name)`.
 
 ### `sessionContextService.js`
-Capa de acceso al contexto de sesión en Redis. Clave: `session:{sessionId}`. TTL: 210 s.
+Capa de acceso al contexto de sesión. Primero intenta Redis; si Redis no está disponible, usa un fallback `Map` en memoria (degradación elegante). Clave Redis: `session:{sessionId}`. TTL constante exportada: `SESSION_TTL_SECONDS = 210`.
 
-**Estructura del contexto en Redis:**
+**Estructura del contexto:**
 ```json
 {
   "lastIntent": "productos",
   "lastEntity": { "type": "product", "value": "hamburguesa" },
+  "lastEntityFound": true,
+  "lastAttributes": [{ "value": "queso", "type": "ingredient" }],
   "availableCategories": ["Electrónica", "Bebidas"],
   "paginationCategory": "Electrónica",
   "paginationOffset": 10,
   "paginationTotal": 25,
-  "updatedAt": "2026-03-31T12:00:00.000Z"
+  "updatedAt": "2026-04-02T12:00:00.000Z"
 }
 ```
 
-Los campos de paginación se limpian automáticamente cuando el usuario realiza una búsqueda nueva.
+`lastEntityFound = false` se establece cuando un producto buscado no existe en BD; hace que el siguiente "sí" ambiguo muestre el catálogo en lugar de re-querying el mismo producto. Los campos de paginación se limpian automáticamente cuando el usuario realiza una búsqueda nueva.
 
 ### `normalize.js`
 Funciones de normalización: `normalize(text)` (lowercase + NFD strip acentos + quitar ¿¡), `toSingular(word)`, `wordVariants(word)`.
 
 ### `chatSocket.js`
 Punto de entrada Socket.io. Maneja `send_message` → valida `sessionId` → guarda mensaje de usuario → llama `processMessage()` → guarda y emite respuesta del bot.
+
+Incluye un **timer de inactividad** (210 s): si el usuario no escribe durante ese tiempo, el bot envía un mensaje de reenganche con el listado de categorías disponibles y establece el contexto `category_selection` para que el siguiente mensaje pueda seleccionar una categoría directamente.
 
 ### `Message.jsx`
 Componente de mensaje del frontend. Usa `white-space: pre-wrap` para que los `\n` del formateador se rendericen como saltos de línea en el navegador.
@@ -724,6 +809,110 @@ Preguntas del tipo `"que hamburguesas tienen"`, `"que aguas tiene"` ya funcionab
 
 ---
 
+### Sprint 14 — Atributos de producto y servicios del negocio *(2 abr 2026)*
+
+#### Feature A — Atributos de producto (`product_attributes`)
+
+Cuando una consulta de producto devuelve exactamente un resultado, se buscan los atributos clave/valor en la tabla `product_attributes` y se añade una sección natural al final de la respuesta.
+
+Rutas de respuesta que ahora incluyen atributos:
+- **Entidad producto directa** (`"tienes la pizza hawaiana?"`)
+- **Precios con entidad** (`"cuánto cuesta la pizza hawaiana?"`)
+- **Descripción** (`"que contiene la hamburguesa bbq?"`)
+
+Cambios:
+- `businessModel.js` → `getProductAttributes(productIds[])` — query por múltiples IDs a la vez, devuelve mapa agrupado
+- `businessInfoService.js` → exporta `getProductAttributes`
+- `intentResponseFormatter.js` → `formatProductAttributes(attrsMap, productId)` — devuelve `''` si no hay atributos
+- `messagePipeline.js` → inyección de atributos en las tres rutas de respuesta de producto
+
+#### Feature B — Servicios del negocio (`business_services`)
+
+Nuevo intent `servicios` (standalone: true). Responde con la lista de servicios disponibles e invita a preguntar por uno específico. Si el usuario nombra un servicio, responde con nombre + descripción + precio.
+
+La respuesta de `ubicacion` ahora incluye automáticamente un listado de los servicios del negocio.
+
+Cambios:
+- `businessModel.js` → `getServices(businessId)`, `getServiceByName(businessId, name)`
+- `businessInfoService.js` → `getServiceByName` exportado; `servicios` en `QUERY_MAP`
+- `intentResponseFormatter.js` → `FORMATTERS.servicios`, `formatServiceDetail(service)`
+- `intents.js` → nuevo intent `servicios` (standalone: true). Frases `"que servicios ofrecen/tienen/ofrece"` **movidas** desde `productos` donde causaban falsos positivos de enrutamiento
+- `messagePipeline.js` → nuevas ramas `intent === 'servicios'` con y sin entidad; `ubicacion` ahora appends el listado de servicios
+
+---
+
+### Sprint 15 — Correcciones de follow-up con artículo y flujo post-error *(2 abr 2026)*
+
+#### Problema 1 — Follow-up con artículo disparaba "no encontré el producto"
+
+**Síntoma:** Tras preguntar por la hamburguesa BBQ y recibir respuesta, escribir **"la pizza mexicana"** (artículo incluido) devolvía "no encontré el producto" aunque Pizza Mexicana existe en la BD.
+
+**Causa:** `extractFollowUpEntity()` Shape 2 (bare noun) retornaba el texto literal `"la pizza mexicana"`. La query `ILIKE '%la pizza mexicana%'` no coincide con el nombre real `"Pizza Mexicana"`.
+
+**Fix:** Función interna `stripLeadingArticle()` en `extractFollowUpEntity` que elimina artículos iniciales (`el/la/los/las/un/una`) antes de devolver el candidato. Aplicado en Shape 1a, 1b y Shape 2.
+
+#### Problema 2 — `lastEntityFound = false` no se propagaba en rutas followup/context
+
+**Síntoma:** Tras un miss de producto vía follow-up ("la torta de res" no existe), escribir **"sí"** re-preguntaba lo mismo en lugar de mostrar el catálogo.
+
+**Causa:** El guard `lastEntityFound = false` en `processMessage` solo cubría `strategy === 'entity'`. Las rutas `followup` y `context` no tenían mecanismo de detección de miss.
+
+**Fix:** Detect miss vía texto de respuesta: si `replyText` comienza con `"Lo siento, no encontr"` o `"No encontr"` en estrategias `followup`/`context`, se establece `lastEntityFound = false`.
+
+#### Problema 3 — `lastEntityFound = false` + "sí" → intent equivocado
+
+**Síntoma:** `"sí"` después de un miss con intent=`descripcion` → prompts `"¿Sobre qué producto deseas más información?"` en lugar del catálogo.
+
+**Fix:** Regla 4 de `decide()` ahora fuerza `intent = 'productos'` cuando `lastEntityFound === false`, sin importar cuál era el `lastIntent` anterior.
+
+#### Tabla de regresión — Sprint 15
+
+| Mensaje | Antes | Después |
+|---|---|---|
+| `"la pizza mexicana"` (follow-up) | "no encontré el producto" | Info de Pizza Mexicana |
+| `"el taco pastor"` (follow-up) | "no encontré el producto" | Info del producto |
+| `"sí"` tras miss (intent=descripcion) | Re-prompt ¿sobre qué producto? | Catálogo de productos |
+| `"sí"` tras miss (intent=productos) | Re-query del mismo producto fallido | Catálogo de productos |
+
+---
+
+### Sprint 16 — Correcciones de enrutamiento por keywords y contexto general *(2 abr 2026)*
+
+#### Problema 1 — "productos disponibles" enviaba al fallback de IA
+
+**Síntoma:** El bot presenta un menú de ayuda con la opción "Productos disponibles". Al escribirla, el usuario recibía de nuevo el mismo mensaje de fallback.
+
+**Causa:** `"productos disponibles"` no coincidía con ninguna keyword del intent `productos` y caía en el mock de IA sin contexto → respuesta genérica.
+
+**Fix:** Añadidas keywords al intent `productos` en `intents.js`:
+```js
+{ phrase: 'productos disponibles', weight: 2 },
+{ phrase: 'ver productos',         weight: 2 },
+{ phrase: 'ver catalogo',          weight: 2 },
+{ phrase: 'productos',             weight: 1 },
+```
+
+#### Problema 2 — Consulta general del catálogo heredaba entidad del contexto
+
+**Síntoma:** Secuencia: `pizza mexicana` → `precio` → `pizza hawaiana` → **`"que productos tienes"`** → la respuesta mostraba info sobre pizza hawaiana en lugar del catálogo.
+
+**Causa:** `productos` tiene `standalone: false`. La Regla 3 de `decide()` siempre heredaba `lastEntity` del contexto para intents no-standalone, aunque el mensaje fuera una petición explícita del catálogo completo.
+
+**Fix — Regla 2.5 en `decide()`:** Cuando `intent=productos` + `score ≥ HIGH_CONFIDENCE_THRESHOLD (3)` + sin entidad en el mensaje → devuelve `strategy=intent, entity=null, usedContext=false` antes de llegar a la Regla 3.
+
+**Fix — `buildContextUpdate()`:** Cuando una consulta general de catálogo se resuelve (`strategy=intent, intent=productos, entity=null`), se limpia `lastEntity` en Redis para que no contamine turnos posteriores.
+
+#### Tabla de regresión — Sprint 16
+
+| Mensaje | Antes | Después |
+|---|---|---|
+| `"productos disponibles"` (sin contexto) | Fallback IA genérico | Intent `productos` → catálogo |
+| `"que productos tienes"` (con ctx pizza) | Info de pizza del contexto | Catálogo / lista de categorías |
+| `"que vendes"` (con ctx producto) | Mismo producto del contexto | Catálogo general |
+| `"precios"` `"cuanto cuesta"` (con ctx) | Sin cambio — sigue usando contexto ✓ | Sin cambio ✓ |
+
+---
+
 ### Sprint 8 — Formato de listas + paginación *(31 mar 2026)*
 
 #### Mejoras de formato
@@ -750,7 +939,7 @@ Preguntas del tipo `"que hamburguesas tienen"`, `"que aguas tiene"` ya funcionab
 
 ## 7. Testing
 
-**698 pruebas** en **14 suites** — todas pasan (`npm test`).
+**795 pruebas** en **15 suites** — todas pasan (`npm test`).
 
 ### Ejecutar los tests
 
@@ -765,19 +954,20 @@ npm run test:coverage    # Reporte HTML en ./coverage/
 
 | Archivo | Módulo cubierto | Aprox. casos |
 |---|---|---|
-| `businessInfoService.test.js` | QUERY_MAP, despacho, errores BD | ~13 |
-| `conversationalFlow.test.js` | Pipeline multi-turno, decide(), buildContextUpdate(), paginación | ~80 |
+| `attributeSearch.test.js` | buildAttributeConditions, searchByAttribute(s), formatAttributeResponse | ~20 |
+| `businessInfoService.test.js` | QUERY_MAP (6 intents), despacho, errores BD | ~13 |
+| `conversationalFlow.test.js` | Pipeline multi-turno, decide() (incl. Regla 2.5), buildContextUpdate(), paginación, extractFollowUpEntity, follow-up con artículo, catálogo general vs contexto | ~177 |
 | `dayDetector.test.js` | Detección de 7 días, word-boundary, sin match | ~15 |
 | `entityDetector.test.js` | 21 patrones regex, blocklist, formatters, TIPO_DE_RE | ~55 |
 | `hybridFlow.test.js` | shouldUseAI(), hasRelevantData(), classifyAIRequest(), filterRelevantData(), handleAIFallback(), processMessage(), regresiones de enrutamiento | ~88 |
-| `intentResponseFormatter.test.js` | formatList, 5 formatters, formatTime, fallbacks | ~35 |
-| `intentService.test.js` | 5 intents, scoring, edge cases, formas tu-persona | ~84 |
+| `intentResponseFormatter.test.js` | formatList, 6 formatters (incl. servicios), formatProductAttributes, formatServiceDetail | ~35 |
+| `intentService.test.js` | 6 intents, scoring, edge cases, formas tu-persona, servicios | ~84 |
 | `keywordResponses.test.js` | Keywords, sin match, guards | ~16 |
 | `messageModel.test.js` | create(), findByRoom(), clear() | ~10 |
 | `mockOpenAI.test.js` | getMockOpenAIResponse, getRAGOpenAIResponse | ~25 |
 | `nlpEntityExtractor.test.js` | normalize(), patrones, blocklist, trigger, NLP | ~36 |
 | `normalize.test.js` | Funciones de normalización y variantes | ~15 |
-| `sessionContextService.test.js` | getContext/updateContext, TTL, merge parcial | ~30 |
+| `sessionContextService.test.js` | getContext/updateContext, TTL, merge parcial, in-memory fallback | ~30 |
 | `textPreprocessor.test.js` | expandAbbreviations, correctTypos, preprocessMessage | ~96 |
 
 ### Describes de `hybridFlow.test.js`
@@ -800,7 +990,7 @@ npm run test:coverage    # Reporte HTML en ./coverage/
 
 | Módulo | Test que lo mockea | Razón |
 |---|---|---|
-| `../../src/config/database` | `entityDetector`, `conversationalFlow`, `nlpEntityExtractor`, `hybridFlow` | Evitar PostgreSQL real |
+| `../../src/config/database` | `entityDetector`, `conversationalFlow`, `nlpEntityExtractor`, `hybridFlow`, `attributeSearch` | Evitar PostgreSQL real |
 | `ioredis` | `sessionContextService`, `conversationalFlow`, `hybridFlow` | Evitar Redis real (Map en memoria) |
 | `../../src/models/businessModel` | `businessInfoService`, `hybridFlow` | Aislar QUERY_MAP y queries RAG |
 
@@ -829,8 +1019,8 @@ Secreto requerido: `CODECOV_TOKEN` (en Settings → Secrets → Actions).
 
 1. `intents.js` → nueva clave con `standalone`, `keywords[]`
 2. `businessModel.js` → nuevo método con la query SQL
-3. `businessInfoService.js` → entrada en `QUERY_MAP`
-4. `intentResponseFormatter.js` → nueva función en `FORMATTERS`
+3. `businessInfoService.js` → entrada en `QUERY_MAP` + exportar helpers si el pipeline los necesita directamente
+4. `intentResponseFormatter.js` → nueva función en `FORMATTERS` (y exportar si `executeDecision` la usa directamente)
 
 ### Agregar patrones de consulta de producto
 

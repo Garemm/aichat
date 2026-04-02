@@ -38,12 +38,16 @@ const {
   getCategories,
   getProductosByCategory,
   countProductosByCategory,
+  getProductAttributes,
+  getServiceByName,
 } = require('./businessInfoService');
-const { formatIntentResponse, formatHorarioDay, formatList, formatDescripcionResponse } = require('./intentResponseFormatter');
+const { formatIntentResponse, formatHorarioDay, formatList, formatDescripcionResponse, formatProductAttributes, formatServiceDetail } = require('./intentResponseFormatter');
 const { getKeywordResponse } = require('../mockai/keywordResponses');
 const { getMockOpenAIResponse, getRAGOpenAIResponse } = require('../temp/mockOpenAI');
 const { shouldUseAI, hasRelevantData } = require('./aiDecisionEngine');
 const { filterRelevantData } = require('./ragFilterService');
+const { searchByAttributes, formatAttributeResponse } = require('./attributeSearchService');
+const { extractAttribute } = require('./attributeExtractor');
 
 /** Minimum score to consider intent as "high confidence" (skip context). */
 const HIGH_CONFIDENCE_THRESHOLD = 3;
@@ -89,15 +93,31 @@ function normalizeForMatch(s) {
  * Returns the original category name from availableCategories that best matches
  * the user's message, or null if no match found.
  *
- * @param {string}   normalizedText
+ * Uses the same normalization as the main pipeline so punctuation/accents are
+ * handled consistently. Matches in BOTH directions:
+ *   - forward:  user text contains the category name  ("quiero ver bebidas" → "Bebidas")
+ *   - reverse:  category name contains the user text   ("Bebidas Calientes" ← "bebidas")
+ *
+ * Sorting by descending name length ensures the most-specific category wins
+ * when two categories could match (e.g. "Pizzas" vs "Pizzas Especiales").
+ *
+ * @param {string}   normalizedText        Already preprocessed with preprocessMessage()
  * @param {string[]} availableCategories
  * @returns {string|null}
  */
 function detectCategorySelection(normalizedText, availableCategories) {
   if (!availableCategories || availableCategories.length === 0) return null;
-  const textNorm = normalizeForMatch(normalizedText);
-  for (const cat of availableCategories) {
-    if (textNorm.includes(normalizeForMatch(cat))) return cat;
+
+  // Sort longest category first so "Pizzas Especiales" beats "Pizzas" on exact matches
+  const sorted = [...availableCategories].sort((a, b) => b.length - a.length);
+
+  for (const cat of sorted) {
+    // Use full normalize() — same pipeline as preprocessMessage — so punctuation
+    // and accents are stripped identically on both sides.
+    const catNorm = normalize(cat);
+    if (normalizedText.includes(catNorm) || catNorm.includes(normalizedText)) {
+      return cat;
+    }
   }
   return null;
 }
@@ -226,10 +246,25 @@ function enrichFollowUpCandidate(candidate, contextValue) {
 function extractFollowUpEntity(normalizedText, lastEntity) {
   if (!lastEntity?.value) return null;
 
-  // Shape 1a: "y pizza mexicana" / "y de jamaica" — starts with "y"
+  // Articles that should never be the first word of an entity name.
+  const LEAD_ARTICLES = new Set(['el', 'la', 'los', 'las', 'un', 'una', 'unos', 'unas']);
+
+  /**
+   * Strips a leading article/preposition from an extracted candidate string.
+   * "la pizza mexicana" → "pizza mexicana"
+   * "los tacos" → "tacos"
+   */
+  function stripLeadingArticle(text) {
+    const parts = text.trim().split(/\s+/);
+    let i = 0;
+    while (i < parts.length - 1 && LEAD_ARTICLES.has(parts[i])) i++;
+    return parts.slice(i).join(' ');
+  }
+
+  // Shape 1a: "y pizza mexicana" / "y la pizza mexicana" — starts with "y"
   const matchY = normalizedText.match(/^y\s+(?<entity>[\w\s]+?)$/);
   if (matchY?.groups?.entity) {
-    const candidate = matchY.groups.entity.trim();
+    const candidate = stripLeadingArticle(matchY.groups.entity.trim());
     if (candidate.length >= 2 && !candidate.split(/\s+/).some((w) => QUESTION_WORDS.has(w))) {
       return enrichFollowUpCandidate(candidate, lastEntity.value);
     }
@@ -240,14 +275,15 @@ function extractFollowUpEntity(normalizedText, lastEntity) {
     /^(?:tambien|igual|otro|otra|tb|tmb)\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\w\s]+?)$/
   );
   if (matchTrigger?.groups?.entity) {
-    const candidate = matchTrigger.groups.entity.trim();
+    const candidate = stripLeadingArticle(matchTrigger.groups.entity.trim());
     if (candidate.length >= 2 && !candidate.split(/\s+/).some((w) => QUESTION_WORDS.has(w))) {
       return enrichFollowUpCandidate(candidate, lastEntity.value);
     }
   }
 
   // Shape 2: bare noun phrase (2-5 tokens, no question/meta/verb words)
-  // Catches "pizza mexicana", "pizza bbq" when user refines a product search
+  // Catches "pizza mexicana", "la pizza mexicana" when user refines a product search.
+  // Leading articles are stripped so "la pizza mexicana" → "pizza mexicana".
   const BARE_SKIP = new Set([
     ...QUESTION_WORDS,
     'hay', 'tienen', 'tienes', 'tiene', 'venden', 'vende', 'vendes',
@@ -257,9 +293,14 @@ function extractFollowUpEntity(normalizedText, lastEntity) {
     'tambien', 'igual', 'otro', 'otra', 'tb', 'tmb',
   ]);
   const tokens = normalizedText.split(/\s+/);
-  if (tokens.length >= 2 && tokens.length <= 5) {
+  // Allow leading articles in the token count — they'll be stripped after the check.
+  const meaningfulTokens = tokens.filter((t) => !LEAD_ARTICLES.has(t));
+  if (tokens.length >= 2 && tokens.length <= 6 && meaningfulTokens.length >= 1) {
     if (!tokens.some((w) => BARE_SKIP.has(w)) && normalizedText.length >= 3) {
-      return normalizedText;
+      const cleaned = stripLeadingArticle(normalizedText);
+      if (cleaned.length >= 2) {
+        return enrichFollowUpCandidate(cleaned, lastEntity.value);
+      }
     }
   }
 
@@ -353,6 +394,21 @@ function decide(intentResult, entityResult, context, normalizedText) {
     };
   }
 
+  // Rule 1.7: Attribute entity → always route to attribute search (no AI needed)
+  if (entityResult.type === 'attribute') {
+    return {
+      strategy: 'attribute',
+      intent: 'productos',
+      entity: {
+        type: 'attribute',
+        value: entityResult.value,
+        attributeType: entityResult.attributeType,
+      },
+      usedContext: false,
+      reason: `attribute detected: "${entityResult.value}" (${entityResult.attributeType})`,
+    };
+  }
+
   // Rule 2: Clear entity detected in message → use it directly, NO context
   if (hasEntity) {
     // If we also have an intent, combine them; otherwise infer 'productos' for product/category entities
@@ -367,6 +423,22 @@ function decide(intentResult, entityResult, context, normalizedText) {
       entity: { type: entityResult.type, value: entityResult.value },
       usedContext: false,
       reason: `entity detected: ${entityResult.type}="${entityResult.value}"`,
+    };
+  }
+
+  // Rule 2.5: High-confidence general catalog query ("que productos tienes", "que vendes").
+  // When the user explicitly asks for the full product list with a strong signal
+  // (score >= HIGH_CONFIDENCE_THRESHOLD), this is a topic reset — never inherit
+  // a stale context entity. Without this guard, Rule 3 would pull "pizza hawaiana"
+  // from context and return that product's info instead of the catalog.
+  if (hasIntent && intentResult.intent === 'productos' &&
+      intentResult.score >= HIGH_CONFIDENCE_THRESHOLD && !hasEntity) {
+    return {
+      strategy: 'intent',
+      intent: 'productos',
+      entity: { type: null, value: null },
+      usedContext: false,
+      reason: `general catalog query: "productos" score=${intentResult.score}`,
     };
   }
 
@@ -408,14 +480,18 @@ function decide(intentResult, entityResult, context, normalizedText) {
     if (context.lastEntity?.value || context.lastIntent) {
       // If the last entity was NOT found in DB, treat as catalog intent (entity.value = null)
       // so a bare "sí" after a miss shows the catalog instead of re-querying the dead entity.
-      const entityForAmbiguous = (context.lastEntityFound === false)
+      const entityNotFound = context.lastEntityFound === false;
+      const entityForAmbiguous = entityNotFound
         ? { type: null, value: null }
         : (context.lastEntity?.value
           ? { type: context.lastEntity.type, value: context.lastEntity.value }
           : { type: null, value: null });
+      // When product was not found, redirect to catalog regardless of previous intent
+      // (avoids re-querying unknown product or prompting for a product name again)
+      const intentForAmbiguous = entityNotFound ? 'productos' : context.lastIntent;
       return {
         strategy: 'context',
-        intent: context.lastIntent,
+        intent: intentForAmbiguous,
         entity: entityForAmbiguous,
         usedContext: true,
         reason: `ambiguous message, using context`,
@@ -483,6 +559,20 @@ function buildContextUpdate(decision) {
   // Category selected — reset pagination state; executeDecision will set it
   if (decision.strategy === 'category_select') return {};
 
+  // Attribute search — store the searched attribute(s) in Redis
+  if (decision.strategy === 'attribute') {
+    return {
+      lastIntent: 'productos',
+      lastEntity: { type: 'attribute', value: decision.entity.value },
+      lastAttributes: decision._attributes ?? [{ value: decision.entity.value, type: decision.entity.attributeType }],
+      lastEntityFound: true,
+      paginationCategory: null,
+      paginationOffset: null,
+      paginationTotal: null,
+      availableCategories: null,
+    };
+  }
+
   // Entity detected → track entity, clear intent (new track)
   if (decision.entity?.value && !decision.usedContext) {
     const entityToStore = { type: decision.entity.type, value: decision.entity.value };
@@ -498,6 +588,7 @@ function buildContextUpdate(decision) {
       paginationOffset: null,
       paginationTotal: null,
       availableCategories: null,
+      lastAttributes: null,
     };
   }
 
@@ -522,6 +613,20 @@ function buildContextUpdate(decision) {
       paginationOffset: null,
       paginationTotal: null,
       availableCategories: null,
+    };
+  }
+
+  // General catalog query (productos intent, no entity) → clear stale entity so the
+  // next ambiguous follow-up ("cuánto cuesta?") doesn't re-query the old product.
+  if (decision.strategy === 'intent' && decision.intent === 'productos' && !decision.entity?.value) {
+    return {
+      lastIntent: 'productos',
+      lastEntity: { type: null, value: null },
+      paginationCategory: null,
+      paginationOffset: null,
+      paginationTotal: null,
+      availableCategories: null,
+      lastAttributes: null,
     };
   }
 
@@ -585,6 +690,17 @@ async function executeDecision(decision, originalText, businessId, context, sess
     }
   }
 
+  // ── Attribute search: "algo con X", "para madera", "que tenga wifi" ──────────
+  if (decision.strategy === 'attribute') {
+    try {
+      const attributes = decision._attributes ?? [{ value: decision.entity.value, type: decision.entity.attributeType }];
+      const { rows, strategy } = await searchByAttributes(attributes, businessId);
+      return formatAttributeResponse(attributes, rows, strategy);
+    } catch (err) {
+      console.error('[Pipeline] Error in attribute search:', err.message);
+    }
+  }
+
   // Horarios for a specific day
   if (decision.intent === 'horarios' && decision.entity?.type === 'day') {
     try {
@@ -592,6 +708,24 @@ async function executeDecision(decision, originalText, businessId, context, sess
       return formatHorarioDay(decision.entity.value, row);
     } catch (err) {
       console.error('[Pipeline] Error querying horarios by day:', err.message);
+    }
+  }
+
+  // Servicios intent: show specific service detail if entity provided, else full list
+  if (decision.intent === 'servicios') {
+    if (decision.entity?.value) {
+      try {
+        const services = await getServiceByName(businessId, decision.entity.value);
+        if (services.length > 0) return formatServiceDetail(services[0]);
+      } catch (err) {
+        console.error('[Pipeline] Error querying service by name:', err.message);
+      }
+    }
+    try {
+      const data = await getBusinessInfoByIntent('servicios', businessId);
+      return formatIntentResponse('servicios', data);
+    } catch (err) {
+      console.error('[Pipeline] Error querying servicios:', err.message);
     }
   }
 
@@ -603,7 +737,12 @@ async function executeDecision(decision, originalText, businessId, context, sess
         return `Lo siento, no encontré el producto "*${decision.entity.value}*". ¿Quieres ver nuestro catálogo?`;
       }
       const p = rows[0];
-      return `El producto *${p.name}* cuesta $${Number(p.price).toFixed(2)}.`;
+      let response = `El producto *${p.name}* cuesta $${Number(p.price).toFixed(2)}.`;
+      try {
+        const attrsMap = await getProductAttributes([p.id]);
+        response += formatProductAttributes(attrsMap, p.id);
+      } catch { /* attributes are optional */ }
+      return response;
     } catch (err) {
       console.error('[Pipeline] Error querying product price:', err.message);
     }
@@ -616,7 +755,14 @@ async function executeDecision(decision, originalText, businessId, context, sess
     }
     try {
       const rows = await queryProducts(decision.entity.value, businessId);
-      return formatDescripcionResponse(decision.entity.value, rows);
+      let response = formatDescripcionResponse(decision.entity.value, rows);
+      if (rows.length > 0) {
+        try {
+          const attrsMap = await getProductAttributes([rows[0].id]);
+          response += formatProductAttributes(attrsMap, rows[0].id);
+        } catch { /* attributes are optional */ }
+      }
+      return response;
     } catch (err) {
       console.error('[Pipeline] Error querying description:', err.message);
     }
@@ -651,7 +797,14 @@ async function executeDecision(decision, originalText, businessId, context, sess
     if (decision.entity.type === 'product') {
       try {
         const rows = await queryProducts(decision.entity.value, businessId);
-        return formatProductResponse(decision.entity.value, rows);
+        let response = formatProductResponse(decision.entity.value, rows);
+        if (rows.length === 1) {
+          try {
+            const attrsMap = await getProductAttributes([rows[0].id]);
+            response += formatProductAttributes(attrsMap, rows[0].id);
+          } catch { /* attributes are optional */ }
+        }
+        return response;
       } catch (err) {
         console.error('[Pipeline] Error querying product:', err.message);
       }
@@ -677,7 +830,22 @@ async function executeDecision(decision, originalText, businessId, context, sess
         return formatCategoryPrompt(categories);
       }
 
-      return formatIntentResponse(decision.intent, data);
+      let intentResponse = formatIntentResponse(decision.intent, data);
+
+      // For ubicacion: append a brief list of the business's services
+      if (decision.intent === 'ubicacion') {
+        try {
+          const services = await getBusinessInfoByIntent('servicios', businessId);
+          if (services && services.length > 0) {
+            const svcList = services.map((s) => `• ${s.name}`).join('\n');
+            intentResponse +=
+              `\n\n🛎️ También ofrecemos los siguientes servicios:\n${svcList}` +
+              '\n\n¿Te gustaría saber más sobre alguno?';
+          }
+        } catch { /* services are optional */ }
+      }
+
+      return intentResponse;
     } catch (err) {
       console.error('[Pipeline] Error querying intent:', err.message);
     }
@@ -774,8 +942,33 @@ async function processMessage({ text, sessionId, businessId }) {
   // 5. Get context from Redis
   const context = await getContext(sessionId);
 
+  // 5b. Attribute follow-up: combine new attribute with previous search context
+  // e.g. "algo con queso" → "y con pollo" → combine [queso, pollo]
+  if (
+    entityResult.type === 'attribute' &&
+    context.lastEntity?.type === 'attribute' &&
+    Array.isArray(context.lastAttributes) &&
+    context.lastAttributes.length > 0
+  ) {
+    const newAttr = { value: entityResult.value, type: entityResult.attributeType };
+    // Avoid duplicates
+    const alreadyPresent = context.lastAttributes.some(
+      (a) => a.value === newAttr.value
+    );
+    if (!alreadyPresent) {
+      const combinedAttributes = [...context.lastAttributes, newAttr];
+      // Override entity result to trigger multi-attribute search
+      entityResult._combinedAttributes = combinedAttributes;
+    }
+  }
+
   // 6. Make decision
   const decision = decide(intentResult, entityResult, context, normalizedText);
+
+  // If we detected combined attributes, attach them to the decision
+  if (entityResult._combinedAttributes) {
+    decision._attributes = entityResult._combinedAttributes;
+  }
 
   // Logging
   const logs = {
@@ -828,11 +1021,24 @@ async function processMessage({ text, sessionId, businessId }) {
     contextUpdate = decision._ctxOverride;
   } else {
     contextUpdate = buildContextUpdate(decision);
-    if (
+    // entity strategy: _rows comes directly from detectEntities
+    const entityMissedViaDirect =
       decision.strategy === 'entity' &&
       decision.entity?.type === 'product' &&
-      entityResult._rows?.length === 0
-    ) {
+      entityResult._rows?.length === 0;
+    // followup / context strategies: entity came from context/follow-up logic,
+    // not from detectEntities, so _rows is undefined. Infer miss from reply text.
+    // Both formatProductResponse and formatDescripcionResponse emit a variant:
+    //   formatProductResponse  → "Lo siento, no encontr..."
+    //   formatDescripcionResponse → "No encontré información..."
+    const entityMissedViaContext =
+      (decision.strategy === 'followup' || decision.strategy === 'context') &&
+      decision.entity?.type === 'product' &&
+      decision.entity?.value &&
+      typeof replyText === 'string' &&
+      (replyText.startsWith('Lo siento, no encontr') || replyText.startsWith('No encontr'));
+
+    if (entityMissedViaDirect || entityMissedViaContext) {
       contextUpdate.lastEntityFound = false;
     }
   }

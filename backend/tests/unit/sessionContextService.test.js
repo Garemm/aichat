@@ -46,9 +46,10 @@ describe('getContext()', () => {
   test('devuelve estructura con todos los campos en null para sesión nueva', async () => {
     const ctx = await getContext(sid('new'));
     expect(ctx).toEqual({
-      lastIntent:   null,
-      lastEntity:   { type: null, value: null },
-      updatedAt:    null,
+      lastIntent:     null,
+      lastEntity:     { type: null, value: null },
+      lastAttributes: null,
+      updatedAt:      null,
     });
   });
 
@@ -216,5 +217,67 @@ describe('flujo conversacional — múltiples turnos', () => {
     ctx = await getContext(id);
     expect(ctx.lastIntent).toBe('horarios');
     expect(ctx.lastEntity).toEqual({ type: null, value: null });
+  });
+});
+
+// ─── Fallback en memoria — Redis caído ───────────────────────────────────────
+
+describe('Fallback en memoria — flujo con Redis caído', () => {
+  afterEach(() => {
+    // Restaurar el mock de Redis al comportamiento normal
+    mockRedisInstance.get.mockImplementation(async (key) => store.get(key) ?? null);
+    mockRedisInstance.setex.mockImplementation(async (key, _ttl, val) => { store.set(key, val); return 'OK'; });
+  });
+
+  test('cuando Redis falla al guardar, el contexto se preserva en el fallback en memoria', async () => {
+    mockRedisInstance.get.mockRejectedValue(new Error('Connection is closed.'));
+    mockRedisInstance.setex.mockRejectedValue(new Error('Connection is closed.'));
+
+    const id = sid('mem-save');
+    await updateContext(id, { lastIntent: 'category_selection', availableCategories: ['Bebidas', 'Pizzas'] });
+
+    const ctx = await getContext(id);
+    expect(ctx.lastIntent).toBe('category_selection');
+    expect(ctx.availableCategories).toEqual(['Bebidas', 'Pizzas']);
+  });
+
+  test('cuando Redis falla, el merge de múltiples turnos se hereda correctamente', async () => {
+    mockRedisInstance.get.mockRejectedValue(new Error('Connection is closed.'));
+    mockRedisInstance.setex.mockRejectedValue(new Error('Connection is closed.'));
+
+    const id = sid('mem-chain');
+
+    // Turno 1 — categorías
+    await updateContext(id, {
+      lastIntent: 'category_selection',
+      availableCategories: ['Pizzas', 'Bebidas'],
+    });
+
+    // Turno 2 — selección (merge con turno 1)
+    await updateContext(id, { lastEntity: { type: 'category', value: 'Pizzas' } });
+
+    const ctx = await getContext(id);
+    expect(ctx.lastIntent).toBe('category_selection');
+    expect(ctx.availableCategories).toEqual(['Pizzas', 'Bebidas']);
+    expect(ctx.lastEntity).toEqual({ type: 'category', value: 'Pizzas' });
+  });
+
+  test('cuando Redis se recupera, las siguientes escrituras se guardan en Redis sin errores', async () => {
+    // Primer turno: Redis caído
+    mockRedisInstance.get.mockRejectedValue(new Error('Connection is closed.'));
+    mockRedisInstance.setex.mockRejectedValue(new Error('Connection is closed.'));
+
+    const id = sid('mem-recover');
+    // No debe lanzar excepción aunque Redis esté caído
+    await expect(updateContext(id, { lastIntent: 'category_selection' })).resolves.toBeUndefined();
+
+    // Redis se recupera
+    mockRedisInstance.get.mockImplementation(async (key) => store.get(key) ?? null);
+    mockRedisInstance.setex.mockImplementation(async (key, _ttl, val) => { store.set(key, val); return 'OK'; });
+
+    // Después de la recuperación, las escrituras funcionan normalmente
+    await updateContext(id, { lastIntent: 'productos' });
+    const ctx = await getContext(id);
+    expect(ctx.lastIntent).toBe('productos');
   });
 });

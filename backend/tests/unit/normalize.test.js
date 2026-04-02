@@ -56,6 +56,25 @@ describe('normalize()', () => {
   test('handles string with only punctuation', () => {
     expect(normalize('¿¡!?')).toBe('');
   });
+
+  test('preserves ñ — does NOT strip it like other diacritics', () => {
+    expect(normalize('buñuelo')).toBe('buñuelo');
+    expect(normalize('Piñata')).toBe('piñata');
+    expect(normalize('mañana')).toBe('mañana');
+    expect(normalize('niño')).toBe('niño');
+    expect(normalize('CAÑÓN')).toBe('cañon');  // accented Ó stripped, Ñ preserved
+  });
+
+  test('strips underscore (treats _ as punctuation)', () => {
+    expect(normalize('hamburguesas_')).toBe('hamburguesas');
+    expect(normalize('hello_world')).toBe('helloworld');
+    expect(normalize('test__double')).toBe('testdouble');
+  });
+
+  test('ñ + underscore combined', () => {
+    expect(normalize('buñuelos_')).toBe('buñuelos');
+    expect(normalize('Niños_')).toBe('niños');
+  });
 });
 
 // ─── toSingular() ─────────────────────────────────────────────────────────────

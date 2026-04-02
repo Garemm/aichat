@@ -273,3 +273,36 @@ describe('formatCategoryResponse()', () => {
     expect(result).toContain('$35.00');
   });
 });
+
+// ─── ñ and underscore normalization ──────────────────────────────────────────
+
+describe('extractEntityCandidate() — ñ y guión bajo', () => {
+  test('"que tiene el buñuelo con miel" → extrae "buñuelo con miel"', () => {
+    expect(extractEntityCandidate('que tiene el buñuelo con miel')).toBe('buñuelo con miel');
+  });
+
+  test('"tienen piñata gigante" → extrae "piñata gigante"', () => {
+    expect(extractEntityCandidate('tienen piñata gigante')).toBe('piñata gigante');
+  });
+
+  test('"precio del buñuelo" → extrae "buñuelo"', () => {
+    expect(extractEntityCandidate('precio del buñuelo')).toBe('buñuelo');
+  });
+
+  test('"tienen hamburguesas con guión bajo al final" — guión bajo se ignora', () => {
+    // The underscore is stripped by normalize() before detection runs
+    // so the entity is extracted cleanly.
+    // We call extractEntityCandidate with already-normalized text (as the pipeline does).
+    const { normalize } = require('../../src/services/normalize');
+    const normalized = normalize('tienen hamburguesas_');
+    expect(normalized).toBe('tienen hamburguesas');
+    expect(extractEntityCandidate(normalized)).toBe('hamburguesas');
+  });
+
+  test('"tienen buñuelos_" — ñ preservada, guión bajo eliminado', () => {
+    const { normalize } = require('../../src/services/normalize');
+    const normalized = normalize('tienen buñuelos_');
+    expect(normalized).toBe('tienen buñuelos');
+    expect(extractEntityCandidate(normalized)).toBe('buñuelos');
+  });
+});

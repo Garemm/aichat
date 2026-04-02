@@ -202,6 +202,66 @@ const BusinessModel = {
     );
     return result.rows[0] || null;
   },
+
+  /**
+   * Returns key/value attributes for an array of product IDs.
+   * Result is grouped by product_id: { [productId]: [{ key, value }, ...] }
+   * @param {number[]} productIds
+   * @returns {Promise<Record<number, {key:string,value:string}[]>>}
+   */
+  async getProductAttributes(productIds) {
+    if (!productIds || productIds.length === 0) return {};
+    const placeholders = productIds.map((_, i) => `$${i + 1}`).join(', ');
+    const result = await db.query(
+      `SELECT product_id, key, value
+       FROM product_attributes
+       WHERE product_id IN (${placeholders})
+       ORDER BY key ASC`,
+      productIds
+    );
+    const map = {};
+    for (const row of result.rows) {
+      if (!map[row.product_id]) map[row.product_id] = [];
+      map[row.product_id].push({ key: row.key, value: row.value });
+    }
+    return map;
+  },
+
+  /**
+   * Intent: servicios
+   * Returns all services offered by a business.
+   * @param {number} businessId
+   * @returns {Promise<{id,name,description,price}[]>}
+   */
+  async getServices(businessId) {
+    const result = await db.query(
+      `SELECT id, name, description, price
+       FROM business_services
+       WHERE business_id = $1
+       ORDER BY name ASC`,
+      [businessId]
+    );
+    return result.rows;
+  },
+
+  /**
+   * Searches business services by name keyword.
+   * @param {number} businessId
+   * @param {string} name  Partial name to match (ILIKE).
+   * @returns {Promise<{id,name,description,price}[]>}
+   */
+  async getServiceByName(businessId, name) {
+    const result = await db.query(
+      `SELECT id, name, description, price
+       FROM business_services
+       WHERE business_id = $1
+         AND name ILIKE $2
+       ORDER BY name ASC
+       LIMIT 5`,
+      [businessId, `%${name}%`]
+    );
+    return result.rows;
+  },
 };
 
 module.exports = BusinessModel;

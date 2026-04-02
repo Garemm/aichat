@@ -84,6 +84,18 @@ const FORMATTERS = {
     if (!row) return 'No encontré información de ubicación.';
     return `📍 Ubicación:\n• Negocio: ${row.name}\n• Ciudad: ${row.city}\n• ${row.description}`;
   },
+
+  servicios(rows) {
+    if (!rows || rows.length === 0) return 'No hay servicios registrados.';
+    const items = rows.map((s) => {
+      const price = s.price != null ? ` — $${Number(s.price).toFixed(2)}` : '';
+      return `${s.name}${price}`;
+    });
+    return (
+      formatList('🛎️ Servicios disponibles:', items) +
+      '\n\n¿Te gustaría saber más sobre alguno de estos servicios?'
+    );
+  },
 };
 
 /**
@@ -137,4 +149,42 @@ function formatDescripcionResponse(entityValue, rows) {
   return `*${name}*: ${p.description}`;
 }
 
-module.exports = { formatIntentResponse, formatHorarioDay, formatList, formatDescripcionResponse };
+/**
+ * Formats a product's key/value attributes as a natural-sounding section.
+ * Returns an empty string if there are no attributes for the given product.
+ *
+ * @param {Record<number, {key:string,value:string}[]>} attrsMap  Grouped by product_id
+ * @param {number} productId
+ * @returns {string}
+ */
+function formatProductAttributes(attrsMap, productId) {
+  const attrs = attrsMap[productId];
+  if (!attrs || attrs.length === 0) return '';
+  const lines = attrs.map((a) => `• ${a.key}: ${a.value}`).join('\n');
+  return `\n\n✨ Características:\n${lines}`;
+}
+
+/**
+ * Formats a single service with full detail (name, description, price).
+ *
+ * @param {{name:string, description:string|null, price:number|null}} service
+ * @returns {string}
+ */
+function formatServiceDetail(service) {
+  const price = service.price != null
+    ? `\n  💲 Precio: $${Number(service.price).toFixed(2)}`
+    : '';
+  const desc = service.description
+    ? `\n  📝 ${service.description}`
+    : '';
+  return `🛎️ *${service.name}*${price}${desc}`;
+}
+
+module.exports = {
+  formatIntentResponse,
+  formatHorarioDay,
+  formatList,
+  formatDescripcionResponse,
+  formatProductAttributes,
+  formatServiceDetail,
+};

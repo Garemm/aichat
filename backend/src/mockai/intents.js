@@ -58,7 +58,7 @@ const intents = {
       { phrase: 'atienden los domingos', weight: 2 },
       { phrase: 'atienden los sabados', weight: 2 },
       { phrase: 'atienden fines de semana', weight: 2 },
-      { phrase: 'abren manana', weight: 2 },
+      { phrase: 'abren mañana', weight: 2 },
       { phrase: 'abren hoy', weight: 2 },
       { phrase: 'abren toda la semana', weight: 3 },
       { phrase: 'abren todos los dias', weight: 3 },
@@ -94,9 +94,6 @@ const intents = {
       { phrase: 'que articulos manejan', weight: 3 },
       { phrase: 'que articulos tienes',  weight: 3 },
       { phrase: 'que articulos tiene',   weight: 3 },
-      { phrase: 'que servicios ofrecen',  weight: 3 },
-      { phrase: 'que servicios tienes',   weight: 3 },
-      { phrase: 'que servicios ofrece',   weight: 3 },
       // Frases parciales (weight 2)
       { phrase: 'hay stock', weight: 2 },
       { phrase: 'tienen en existencia', weight: 2 },
@@ -110,9 +107,13 @@ const intents = {
       { phrase: 'que tiene',   weight: 2 },
       { phrase: 'que tipo de', weight: 2 },
       { phrase: 'que tipos de', weight: 2 },
+      { phrase: 'productos disponibles', weight: 2 },
+      { phrase: 'ver productos', weight: 2 },
+      { phrase: 'ver catalogo', weight: 2 },
       // Palabras sueltas (weight 1)
       { phrase: 'catalogo', weight: 1 },
       { phrase: 'inventario', weight: 1 },
+      { phrase: 'productos', weight: 1 },
     ],
   },
 
@@ -226,6 +227,30 @@ const intents = {
       { phrase: 'ubicacion', weight: 1 },
       { phrase: 'direccion', weight: 1 },
       { phrase: 'sucursal', weight: 1 },
+    ],
+  },
+
+  servicios: {
+    name: 'servicios',
+    standalone: true,
+    keywords: [
+      // Frases completas (weight 3)
+      { phrase: 'que servicios ofrecen', weight: 3 },
+      { phrase: 'que servicios ofrece',  weight: 3 },
+      { phrase: 'que servicios tienes',  weight: 3 },
+      { phrase: 'que servicios tienen',  weight: 3 },
+      { phrase: 'que servicios manejan', weight: 3 },
+      { phrase: 'lista de servicios',    weight: 3 },
+      { phrase: 'tienen servicios',      weight: 3 },
+      { phrase: 'manejan servicios',     weight: 3 },
+      { phrase: 'ofrecen servicios',     weight: 3 },
+      // Frases parciales (weight 2)
+      { phrase: 'servicios disponibles', weight: 2 },
+      { phrase: 'sus servicios',         weight: 2 },
+      { phrase: 'los servicios',         weight: 2 },
+      // Palabras sueltas (weight 1)
+      { phrase: 'servicios', weight: 1 },
+      { phrase: 'servicio',  weight: 1 },
     ],
   },
 };

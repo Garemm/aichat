@@ -25,11 +25,12 @@ function normalize(text) {
   return text
     .toLowerCase()
     .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')   // strip accents
-    .replace(/[¿¡]/g, '')             // strip inverted punct
-    .replace(/[^\w\s]/g, '')          // strip punctuation (keep letters, digits, spaces)
-    .replace(/(.)\1{2,}/g, '$1$1')    // collapse 3+ repeated chars → 2 (hoolaa→hoolaa, holaaa→holaa)
-    .replace(/\s+/g, ' ')             // collapse whitespace
+    .replace(/n\u0303/g, 'ñ')          // restore ñ before stripping other diacritics
+    .replace(/[\u0300-\u036f]/g, '')    // strip remaining accents
+    .replace(/[¿¡]/g, '')              // strip inverted punct
+    .replace(/[^a-z0-9ñ\s]/g, '')      // strip punctuation + underscores (keep letters, digits, ñ, spaces)
+    .replace(/(.)\1{2,}/g, '$1$1')     // collapse 3+ repeated chars → 2 (hoolaa→hoolaa, holaaa→holaa)
+    .replace(/\s+/g, ' ')              // collapse whitespace
     .trim();
 }
 

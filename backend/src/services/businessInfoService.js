@@ -22,6 +22,7 @@ const QUERY_MAP = {
   precios:     (businessId) => BusinessModel.getPrecios(businessId),
   promociones: (businessId) => BusinessModel.getPromociones(businessId),
   ubicacion:   (businessId) => BusinessModel.getUbicacion(businessId),
+  servicios:   (businessId) => BusinessModel.getServices(businessId),
 };
 
 /**
@@ -79,10 +80,31 @@ async function countProductosByCategory(businessId, categoryName) {
   return BusinessModel.countProductosByCategory(businessId, categoryName);
 }
 
+/**
+ * Returns key/value attributes grouped by product_id.
+ * @param {number[]} productIds
+ * @returns {Promise<Record<number, {key:string,value:string}[]>>}
+ */
+async function getProductAttributes(productIds) {
+  return BusinessModel.getProductAttributes(productIds);
+}
+
+/**
+ * Searches services by partial name for a business.
+ * @param {number} businessId
+ * @param {string} name
+ * @returns {Promise<{id,name,description,price}[]>}
+ */
+async function getServiceByName(businessId, name) {
+  return BusinessModel.getServiceByName(businessId, name);
+}
+
 module.exports = {
   getBusinessInfoByIntent,
   getHorariosByDay,
   getCategories,
   getProductosByCategory,
   countProductosByCategory,
+  getProductAttributes,
+  getServiceByName,
 };
