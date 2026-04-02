@@ -1,7 +1,25 @@
 # LLM Chat AI — Documentación del Proyecto
 
-> Última actualización: 31 de marzo de 2026 — Sprint 8 (paginación + formato de listas)
+> Última actualización: 1 de abril de 2026 — Sprint 13 (flujo híbrido IA + correcciones de enrutamiento)
 > Estado: desarrollo activo
+
+---
+
+## Resumen del proyecto
+
+**LLM Chat AI** es un chatbot de atención al cliente en tiempo real, diseñado para negocios locales (restaurantes, ferreterías, papelerías, etc.). Combina lógica NLP determinista propia con un flujo híbrido de IA: primero intenta resolver el mensaje con reglas (regex, scoring de keywords, consultas PostgreSQL); sólo cuando ninguna regla aplica, activa un motor de decisión IA que filtra datos relevantes de la BD (RAG) y los envía a OpenAI (actualmente simulado con un mock).
+
+El usuario escribe mensajes en español coloquial a través de una interfaz React/Vite. Los mensajes viajan por WebSocket (Socket.io) al backend Node.js, donde un **pipeline NLP** los preprocesa (expansión de abreviaturas + corrección de typos), normaliza, detecta intención (horarios, precios, productos, promociones, ubicación), extrae entidades (producto, categoría, día de la semana, promoción) y genera una respuesta estructurada con datos reales del negocio almacenados en PostgreSQL. El contexto conversacional se mantiene entre turnos usando Redis.
+
+**Capacidades actuales:**
+- Responde preguntas sobre horarios (general y por día de la semana, con formas verbales "abres", "cierras")
+- Lista productos con precio, disponibilidad y stock; pagina resultados si hay demasiados
+- Muestra productos por categoría o tipo ("que bebidas tienen", "que tipo de hamburguesas tienen")
+- Informa precios de productos específicos
+- Muestra promociones vigentes y ubicación del negocio
+- Mantiene contexto multi-turno ("¿y cuánto cuesta?" después de preguntar por un producto)
+- **Flujo híbrido IA:** recomendaciones ("que me recomiendas"), comparaciones ("X vs Y"), superlativos ("la más barata", "la mejor"), preguntas de capacidad nutricional — ruteados a OpenAI con contexto RAG filtrado
+- Degrada elegantemente si Redis no está disponible (continúa sin contexto)
 
 ---
 
@@ -61,7 +79,10 @@ aichat/
 │   │   │   ├── messageService.js
 │   │   │   ├── nlpEntityExtractor.js
 │   │   │   ├── normalize.js
-│   │   │   └── sessionContextService.js
+│   │   │   ├── sessionContextService.js
+│   │   │   ├── textPreprocessor.js
+│   │   │   ├── aiDecisionEngine.js
+│   │   │   └── ragFilterService.js
 │   │   ├── sockets/
 │   │   │   └── chatSocket.js
 │   │   └── temp/
@@ -73,6 +94,7 @@ aichat/
 │           ├── conversationalFlow.test.js
 │           ├── dayDetector.test.js
 │           ├── entityDetector.test.js
+│           ├── hybridFlow.test.js
 │           ├── intentResponseFormatter.test.js
 │           ├── intentService.test.js
 │           ├── keywordResponses.test.js
@@ -80,7 +102,8 @@ aichat/
 │           ├── mockOpenAI.test.js
 │           ├── nlpEntityExtractor.test.js
 │           ├── normalize.test.js
-│           └── sessionContextService.test.js
+│           ├── sessionContextService.test.js
+│           └── textPreprocessor.test.js
 │
 ├── .github/
 │   └── workflows/
@@ -203,8 +226,11 @@ El pipeline orquesta todos los servicios NLP y decide qué respuesta generar.
 ```
 Mensaje: "abren el lunes?"   sessionId: "a3f2..."
         │
-        ▼ 1. normalize(text)
-        │    "abren el lunes"
+        ▼ 1. preprocessMessage(text)  [textPreprocessor.js]
+        │    Expande abreviaturas ("xq"→"porque", "q"→"que", etc.)
+        │    Corrige typos (diccionario ~100 palabras + Levenshtein ≤2)
+        │    Llama normalize() internamente
+        │    → "abren el lunes"
         │
         ▼ 2. detectDay(normalizedText)  [dayDetector.js]
         │    Busca nombre de día con word-boundary regex
@@ -223,42 +249,55 @@ Mensaje: "abren el lunes?"   sessionId: "a3f2..."
         │
         ▼ 6. decide(intentResult, entityResult, context, normalizedText)
         │
-        │    ┌─────────────────────────────────────────────────────────┐
-        │    │ REGLAS DE DECISIÓN (en orden de prioridad)              │
-        │    │                                                         │
-        │    │ Regla -1a: "ver más" / "siguiente" + paginationCategory │
-        │    │   → strategy: 'pagination'                              │
-        │    │                                                         │
-        │    │ Regla -1b: texto coincide con availableCategories       │
-        │    │            AND lastIntent === 'category_selection'       │
-        │    │   → strategy: 'category_select'                         │
-        │    │                                                         │
-        │    │ Regla 0: entityResult.type === 'day'                    │
-        │    │   → strategy: 'entity', intent: 'horarios'              │
-        │    │   NUNCA usa contexto                                    │
-        │    │                                                         │
-        │    │ Regla 1: intent standalone + score ≥ 3                  │
-        │    │   → strategy: 'intent', ignora contexto                 │
-        │    │                                                         │
-        │    │ Regla 2: entidad detectada en el mensaje                │
-        │    │   → strategy: 'entity', ignora contexto                │
-        │    │                                                         │
-        │    │ Regla 3: intent no-standalone + entity en contexto      │
-        │    │   → strategy: 'context'  (combina intent + lastEntity)  │
-        │    │                                                         │
-        │    │ Regla 4: mensaje ambiguo + contexto disponible          │
-        │    │   → strategy: 'context'  (usa lastIntent + lastEntity)  │
-        │    │                                                         │
-        │    │ Regla 5: "¿Y pizza mexicana?" → extractFollowUpEntity   │
-        │    │   → strategy: 'followup'                                │
-        │    │                                                         │
-        │    │ Regla 6: ningún match → strategy: 'ai'                  │
-        │    └─────────────────────────────────────────────────────────┘
+        │    ┌─────────────────────────────────────────────────────────────────┐
+        │    │ REGLAS DE DECISIÓN (en orden de prioridad)                      │
+        │    │                                                                 │
+        │    │ Regla -1a: "ver más" / "siguiente" + paginationCategory         │
+        │    │   → strategy: 'pagination'                                      │
+        │    │                                                                 │
+        │    │ Regla -1b: texto coincide con availableCategories               │
+        │    │            AND lastIntent === 'category_selection'               │
+        │    │   → strategy: 'category_select'                                 │
+        │    │                                                                 │
+        │    │ Regla 0: entityResult.type === 'day'                            │
+        │    │   → strategy: 'entity', intent: 'horarios'                     │
+        │    │   NUNCA usa contexto                                            │
+        │    │                                                                 │
+        │    │ Regla 1: intent standalone + score ≥ 3                         │
+        │    │   → strategy: 'intent', ignora contexto                        │
+        │    │                                                                 │
+        │    │ Regla 1.5: AI pre-screen — shouldUseAI() con entidad real      │
+        │    │   Si texto contiene RECOMMEND_RE / COMPARE_RE /               │
+        │    │   SUPERLATIVE_RE / CAPACITY_RE → strategy: 'ai'               │
+        │    │   ANTES de que la entidad detectada bloquee la ruta de IA     │
+        │    │                                                                 │
+        │    │ Regla 2: entidad detectada en el mensaje                        │
+        │    │   → strategy: 'entity', ignora contexto                        │
+        │    │   Para tipo='product' o tipo='category' infiere                 │
+        │    │   intent='productos' si no hay intent en el mensaje             │
+        │    │                                                                 │
+        │    │ Regla 3: intent no-standalone + entity en contexto              │
+        │    │   → strategy: 'context'  (combina intent + lastEntity)         │
+        │    │                                                                 │
+        │    │ Regla 4: mensaje ambiguo + contexto disponible                  │
+        │    │   → strategy: 'context'  (usa lastIntent + lastEntity)         │
+        │    │                                                                 │
+        │    │ Regla 5: "¿Y pizza mexicana?" → extractFollowUpEntity          │
+        │    │   → strategy: 'followup'                                        │
+        │    │                                                                 │
+        │    │ Regla 6: anti-fallback con contexto                             │
+        │    │   Sólo si lastEntity.type !== 'day' (entidades temporales      │
+        │    │   no contaminan consultas de producto)                          │
+        │    │   → strategy: 'context'                                         │
+        │    │                                                                 │
+        │    │ Regla 7: ningún match → strategy: 'ai'                          │
+        │    └─────────────────────────────────────────────────────────────────┘
         │
         │    Resultado: { strategy: 'entity', intent: 'horarios',
         │                  entity: { type:'day', value:'lunes', dayOfWeek:1 } }
         │
-        ▼ 7. executeDecision(decision, text, businessId, context, sessionId)
+        ▼ 7a. executeDecision(decision, text, businessId, context, sessionId)
+        │     [usado cuando strategy ≠ 'ai']
         │
         │    Rama día + horarios → getHorariosByDay(businessId, 1)
         │      → SELECT … FROM business_hours WHERE day_of_week = 1
@@ -281,6 +320,12 @@ Mensaje: "abren el lunes?"   sessionId: "a3f2..."
         │      → queryProducts(entity.value, businessId)
         │      → "El producto *X* cuesta $Y."
         │
+        │    Entidad categoría en mensaje ('que bebidas tienen',
+        │      'que tipo de hamburguesas tienen'):
+        │      → countProductosByCategory + getProductosByCategory(…, 0)
+        │      → updateContext(paginationCategory, offset, total)
+        │      → formatProductPage(rows, 0, total, cat)
+        │
         │    Entidad producto en mensaje:
         │      → queryProducts → formatProductResponse(entity, rows)
         │
@@ -292,8 +337,18 @@ Mensaje: "abren el lunes?"   sessionId: "a3f2..."
         │           → "Tenemos muchos productos… ¿Buscas algo en específico?"
         │      → sino: formatIntentResponse(intent, data)
         │
-        │    Fallback IA:
-        │      → getKeywordResponse(text)  ||  getMockOpenAIResponse(text, ctx)
+        ▼ 7b. handleAIFallback(...)  [usado cuando strategy === 'ai']
+        │
+        │    Paso 1: keyword response? → devuelve inmediatamente (sin IA)
+        │    Paso 2: shouldUseAI() → ¿amerita realmente IA?
+        │      No → getMockOpenAIResponse() (fallback genérico)
+        │    Paso 3: filterRelevantData() → RAG filter
+        │      Clasifica en: recommendation / comparison / open_query / contextual
+        │      Trae de BD sólo los productos/datos relevantes (máx. MAX_ITEMS=15)
+        │    Paso 4: hasRelevantData()? No → getMockOpenAIResponse()
+        │    Paso 5: getRAGOpenAIResponse(text, ragContext, sessionCtx)
+        │      [simulado — en prod: openai.chat.completions.create()]
+        │      → "🤖 [AI Simulado] … enviado con N resultados …"
         │
         ▼ 8. buildContextUpdate(decision) + updateContext(sessionId, update)
              Persiste en Redis (TTL 210 s, renovado con cada turno activo)
@@ -312,8 +367,15 @@ Mensaje: "abren el lunes?"   sessionId: "a3f2..."
 | 4 | "precio hamburguesa" | Regla 2 (entidad) | entity | "El producto *Hamburguesa* cuesta $150.00." |
 | 5 | "¿y cuánto cuesta?" | Regla 3 (context) | context | Precio de hamburguesa (del contexto) |
 | 6 | "abren el lunes?" | Regla 0 (día) | entity | "El Lunes abrimos de 9:00 am a 6:00 pm. 🕐" |
-| 7 | "abren toda la semana?" | Regla 1 (standalone) | intent | Tabla de horarios completa |
-| 8 | "¿y la pizza mexicana?" | Regla 5 (follow-up) | followup | Tarjeta de pizza mexicana |
+| 7 | "abres este domingo?" | Regla 0 (día) | entity | Horario del domingo |
+| 8 | "abren toda la semana?" | Regla 1 (standalone) | intent | Tabla de horarios completa |
+| 9 | "¿y la pizza mexicana?" | Regla 5 (follow-up) | followup | Tarjeta de pizza mexicana |
+| 10 | "que hamburguesas tienen?" | Regla 2 (entidad=product) | entity | Lista de hamburguesas disponibles |
+| 11 | "que bebidas tienen?" | Regla 2 (entidad=category) | entity | Primera página de productos de Bebidas |
+| 12 | "que tipo de tacos tienen?" | Regla 2 (entidad=cat/product) | entity | Productos de la categoría o con ese nombre |
+| 13 | "que me recomiendas de postres?" | Regla 1.5 (AI prescreen) | ai→RAG | Recomendación de IA con datos filtrados de Postres |
+| 14 | "cual es la pizza más barata?" | Regla 1.5 (AI prescreen) | ai→RAG | Comparación/ranking de pizzas por precio |
+| 15 | "que pizza es la mejor?" | Regla 1.5 (AI prescreen) | ai→RAG | Recomendación subjetiva con contexto de BD |
 
 ---
 
@@ -350,21 +412,83 @@ Backend genera replyText
 **Orquestador principal del sistema NLP.** Reemplaza la lógica que antes estaba en `chatSocket.js`. Exporta `processMessage({ text, sessionId, businessId })` que ejecuta todos los pasos del pipeline y retorna `{ replyText, decision, logs }`.
 
 Contiene además las funciones puras exportadas para testing:
-- `decide(intentResult, entityResult, context, normalizedText)` → aplica las 8 reglas y devuelve `PipelineDecision`
+- `decide(intentResult, entityResult, context, normalizedText)` → aplica las 9+ reglas y devuelve `PipelineDecision`. La Regla 1.5 llama a `shouldUseAI()` con la entidad real detectada para que patrones de recomendación/comparación/superlativo ruteen a IA aunque haya entidad en el mensaje. La Regla 2 infiere `intent='productos'` tanto para entidades de tipo `product` como `category`.
+- `handleAIFallback(originalText, normalizedText, businessId, intentResult, entityResult, context)` → flujo híbrido IA: keyword → shouldUseAI → filterRelevantData → hasRelevantData → getRAGOpenAIResponse
 - `buildContextUpdate(decision)` → calcula el objeto parcial a persistir en Redis
 - `isAmbiguous(normalizedText)` → `true` para mensajes cortos o patrones de seguimiento
 - `extractFollowUpEntity(normalizedText, lastEntity)` → detecta "¿Y X?" cuando hay track activo
 - Constantes de paginación: `PRODUCTS_HARD_LIMIT = 20`, `PAGE_SIZE = 10`
+
+En `executeDecision()`, las entidades de tipo `category` activan el mismo flujo de paginación que la selección manual de categoría: carga la primera página de 10 productos, guarda el estado de paginación en Redis y permite continuar con "ver más".
+
+La Regla 6 (anti-fallback) incluye el guard `context.lastEntity?.type !== 'day'` para que entidades temporales (días de la semana) no contaminen consultas de producto/recomendación en turnos posteriores.
+
+### `aiDecisionEngine.js`
+**Motor de decisión IA.** Determina si un mensaje debe manejarse por el backend determinista o enrutarse a OpenAI. Es una capa puramente decisora — nunca llama a OpenAI directamente.
+
+Función principal: `shouldUseAI(normalizedText, intentResult, entityResult, context) → { routing, reason, aiCategory }`
+
+**Orden de evaluación (prioridad):**
+1. Intent de alta confianza → `backend` (nunca IA)
+2. `RECOMMEND_RE` — "recomiéndame", "recomiendas", "qué me recomiendan" → `ai / recommendation`
+3. `COMPARE_RE` — "compara X y Y", "vs", "cuál conviene más" → `ai / comparison`
+4. `SUPERLATIVE_RE` — "el más barato", "la más cara", "la mejor", "cuesta menos" → `ai / comparison`
+5. `CAPACITY_RE` — "cuántos tacos puedo comer", "cuánto debo consumir" → `ai / open_query`
+6. Entidad detectada → `backend` (catálogo determinista suficiente)
+7. Contexto disponible + mensaje ≤ 4 palabras → `backend` (follow-up corto)
+8. `OPINION_RE` — "vale la pena", "qué opinas" → `ai / open_query`
+9. Mensaje largo (≥ 12 palabras) → `ai / open_query`
+10. Intents competidores con scores cercanos → `ai / open_query`
+11. Score bajo + mensaje moderadamente complejo → `ai / contextual`
+12. Default → `backend` (saludos, "gracias", etc.)
+
+Exporta: `shouldUseAI`, `hasRelevantData`, `LONG_MESSAGE_WORDS`, `MULTI_INTENT_SCORE_GAP`
+
+### `ragFilterService.js`
+**Filtro RAG (Retrieval-Augmented Generation).** Cuando el pipeline decide usar IA, este servicio trae de la BD sólo los datos relevantes antes de armar el prompt para OpenAI. Minimiza tokens y coste.
+
+Función principal: `filterRelevantData(normalizedText, businessId, intentResult, entity, context) → Promise<RAGContext>`
+
+**Tipos de RAG context:**
+- `recommendation` → trae productos de la categoría mencionada (o todos si no hay categoría)
+- `comparison` → intenta extraer candidatos X vs Y; si no hay, trae todos los productos
+- `open_query` → trae productos + horarios según contexto
+- `contextual` → usa `lastEntity`/`lastIntent` para narrowear la consulta
+- `general` → sólo horarios + categorías disponibles
+
+Función auxiliar: `classifyAIRequest()` — mismos patrones que `aiDecisionEngine.js` (deben mantenerse sincronizados). `extractComparisonEntities()` — extrae candidatos "X o Y", "X vs Y" de la pregunta.
+
+Exporta: `filterRelevantData`, `classifyAIRequest`, `extractComparisonEntities`, `MAX_ITEMS` (= 15)
+
+### `textPreprocessor.js`
+**Preprocesador de mensajes.** Corre antes de intent/entity detection. Provee un pipeline de normalización genérico para NLP en español coloquial.
+
+Pipeline interno:
+1. `normalize()` — lowercase + strip acentos + quitar ¿¡
+2. `expandAbbreviations()` — "xq"→"porque", "q"→"que", "tb"→"también", etc. (≈25 abreviaturas)
+3. `correctTypos()` — diccionario de ~100 errores comunes + Levenshtein conservador (≤2 ediciones, sólo cuando EXACTAMENTE un match existe)
+
+**Seguridad:** la corrección de typos es opt-out; cualquier palabra en el `validSet` nunca se modifica. Tokens cortos (≤2 chars) siempre se preservan.
+
+Exporta: `preprocessMessage`, `expandAbbreviations`, `correctTypos`, `singularizeTokens`
+
+### `mockOpenAI.js` (`src/temp/`)
+Fallback de IA simulado. Provee dos funciones:
+- `getMockOpenAIResponse(userMessage, context)` — respuesta genérica cuando el motor de decisión decide que no vale la pena llamar a IA, o cuando el RAG no encontró datos
+- `getRAGOpenAIResponse(userMessage, ragContext, sessionContext)` — simula una llamada a OpenAI con el contexto RAG filtrado; en producción se reemplaza por `openai.chat.completions.create()`
+
+Exporta: `getMockOpenAIResponse`, `getRAGOpenAIResponse`
 
 ### `dayDetector.js`
 Detecta el primer nombre de día en español (con/sin tilde) usando word-boundary regex. Devuelve `{ type: 'day', value: 'lunes', dayOfWeek: 1 }` o `null`. El valor `dayOfWeek` sigue la convención PostgreSQL: 0=domingo, 6=sábado.
 
 ### `entityDetector.js`
 Extrae entidades de tipo `product` o `category` del mensaje usando:
-1. **19 patrones regex** con named capture group `(?<entity>…)` para frases en español (incluyendo patrones `precio X`, `que precio tiene X`, `cual es el precio de X`)
-2. **Fallback Compromise NLP** (solo si hay trigger word en el mensaje)
-3. Consulta PostgreSQL con `ILIKE` para confirmar que el candidato existe en la BD
-4. Exporta `formatProductResponse(entity, rows)` y `formatCategoryResponse(category, rows)` con listas estructuradas
+1. **Pre-check `TIPO_DE_RE`** — antes de cualquier otro patrón detecta `"que tipo(s) de X tienen/hay"` y consulta **categoría primero, luego producto** (orden invertido respecto al flujo normal), para que preguntas como `"que tipo de bebidas tienen"` encuentren la categoría "Bebidas" antes de buscar un producto individual.
+2. **21+ patrones regex** con named capture group `(?<entity>…)` para frases en español (incluyendo `que tipo de X tienen`, `precio X`, `que precio tiene X`, `cual es el precio de X`)
+3. **Fallback Compromise NLP** (solo si hay trigger word en el mensaje)
+4. Consulta PostgreSQL con `ILIKE` para confirmar que el candidato existe en la BD
+5. Exporta `formatProductResponse(entity, rows)` y `formatCategoryResponse(category, rows)` con listas estructuradas
 
 ### `intentDetector.js`
 Scoring de keywords contra `intents.js`. Cada keyword tiene un `weight`. El intent ganador es el de mayor suma de pesos, si supera `MIN_CONFIDENCE = 1`. Exporta `isStandaloneIntent(key)` para distinguir intents que no necesitan entidad (`horarios`, `ubicacion`, `promociones`).
@@ -373,6 +497,8 @@ Scoring de keywords contra `intents.js`. Cada keyword tiene un `weight`. El inte
 Árbol de 5 intenciones. Cada intent incluye `standalone: bool` y `keywords[]` con `{ phrase, weight }`. Los pesos tipicamente son 1–3; frases muy específicas como `"abren toda la semana"` tienen peso 3 para ganar siempre sobre palabras sueltas.
 
 **Intents disponibles:** `horarios`, `productos`, `precios`, `promociones`, `ubicacion`
+
+El intent `productos` incluye las keywords `"que tipo de"` (weight 2) y `"que tipos de"` (weight 2) para que preguntas del estilo `"que tipo de hamburguesas tienen"` sean detectadas correctamente antes del fallback de entidad.
 
 ### `intentResponseFormatter.js`
 Formateadores que convierten filas de la BD en texto con `\n`. Usa el helper interno `formatList(title, items)` que produce:
@@ -485,6 +611,119 @@ Singleton de socket.io-client. `getSessionId()` genera un UUID v4 con `crypto.ra
 - **Bug corregido:** `"abren toda la semana?"` usaba contexto en vez de responder directamente
 - Nuevas suites: `dayDetector`, `entityDetector`, `normalize`, `conversationalFlow` ampliada (371 pruebas)
 
+### Sprint 10 — Preprocesador de texto *(1 abr 2026)*
+- **Creado `textPreprocessor.js`** — pipeline: normalize → expandAbbreviations → correctTypos
+- ~25 abreviaturas informales en español ("xq", "q", "tb", "dir", "stk", etc.)
+- Diccionario de ~100 typos comunes + corrección Levenshtein conservadora (≤2 ediciones, exactamente 1 match)
+- `singularizeTokens()` para candidatos de entidad (protege verbos y stopwords)
+- `processMessage()` actualizado: usa `preprocessMessage()` en lugar de `normalize()` directo
+- Nueva suite: `textPreprocessor.test.js`
+
+### Sprint 11 — Flujo híbrido IA (RAG + Motor de decisión) *(1 abr 2026)*
+- **Creado `aiDecisionEngine.js`** — motor de decisión puro: `shouldUseAI()`, `hasRelevantData()`
+- **Creado `ragFilterService.js`** — filtro RAG: `filterRelevantData()`, `classifyAIRequest()`, `extractComparisonEntities()`
+- **Actualizado `mockOpenAI.js`** — añadida `getRAGOpenAIResponse()` para simular llamada con contexto RAG
+- **Actualizado `messagePipeline.js`**:
+  - `handleAIFallback()` — flujo híbrido: keyword → shouldUseAI → filterRelevantData → getRAGOpenAIResponse
+  - `processMessage()` — rama `strategy='ai'` ahora llama a `handleAIFallback` en lugar de `getMockOpenAIResponse` directo
+  - Logs enriquecidos: `aiUsed`, `ragType`, `ragDataCount`, `ragSummary`
+- Nueva suite: `hybridFlow.test.js` (11 describes, ~88 tests)
+
+### Sprint 12 — Correcciones de enrutamiento IA *(1 abr 2026)*
+
+#### Problema 1 — Entidades bloqueando IA en recomendaciones
+**Síntoma:** "que me recomienda de postres?" devolvía catálogo de postres en lugar de recomendación.
+**Causa:** `shouldUseAI()` evaluaba `RECOMMEND_RE` DESPUÉS del guard de entidad; "postres" era detectado como entidad y el guard devolvía `backend` antes de llegar a los patrones de IA.
+**Fix:**
+- Movidos `RECOMMEND_RE`/`COMPARE_RE` al inicio de `shouldUseAI()`, antes del guard de entidad
+- Añadida **Regla 1.5** en `decide()`: llama a `shouldUseAI()` con la entidad real detectada; si el resultado es `ai`, devuelve `strategy='ai'` antes de la Regla 2 (entity→backend)
+
+#### Problema 2 — Contexto stale contaminando preguntas complejas
+**Síntoma:** "que hamburguesa es la mas barata?" después de preguntar sobre "taco de canasta" reutilizaba el contexto de taco en lugar de razonar sobre hamburguesas.
+**Causa:** faltaban patrones `SUPERLATIVE_RE`/`CAPACITY_RE` en `shouldUseAI()`; el guard de contexto no tenía límite de palabras.
+**Fix:**
+- Añadidos `SUPERLATIVE_RE` y `CAPACITY_RE` antes del guard de entidad en `shouldUseAI()`
+- Guard de contexto limitado a mensajes de ≤ 4 palabras (mensajes más largos deben resolverse con IA)
+- Patrones sincronizados en `ragFilterService.classifyAIRequest()`
+
+#### Tabla de regresión — Sprint 12
+
+| Mensaje | Antes | Después |
+|---|---|---|
+| "que me recomienda de postres?" | catálogo de postres | RAG recomendación |
+| "que pizza recomiendas?" | catálogo de pizzas | RAG recomendación |
+| "que hamburguesa es la mas barata?" | contexto "taco" | RAG comparación |
+| "cuántos tacos puedo comer al día?" | contexto o catálogo | RAG open_query |
+
+### Sprint 13 — Correcciones de detección de horarios y contexto de día *(1 abr 2026)*
+
+#### Problema 1 — Horarios en segunda persona singular no detectados
+**Síntoma:** "que día abres?", "cuando abres?", "a que hora abres?", "que dias vendes?" no detectaban el intent `horarios`.
+**Causa:** todas las keywords del intent usaban tercera persona plural ("abren", "cierran") pero no la segunda persona singular ("abres", "cierras").
+**Fix:** añadidas 9 keywords al intent `horarios` en `intents.js`:
+```js
+{ phrase: 'a que hora abres', weight: 3 },
+{ phrase: 'a que hora cierras', weight: 3 },
+{ phrase: 'que dias abres', weight: 3 },
+{ phrase: 'que dia abres', weight: 3 },
+{ phrase: 'que dias vendes', weight: 3 },
+{ phrase: 'cuando abres', weight: 2 },
+{ phrase: 'cuando cierras', weight: 2 },
+{ phrase: 'abres', weight: 1 },
+{ phrase: 'cierras', weight: 1 },
+```
+
+#### Problema 2 — Contexto de día contaminando consultas de producto/recomendación
+**Síntoma:** tras preguntar "abres este domingo?" (entidad = `{type:'day', value:'domingo'}`), el siguiente mensaje "que pizza me recomiendas?" era enrutado a horarios con error por la Regla 6 anti-fallback.
+**Causas:**
+1. `RECOMMEND_RE` no incluía la forma "recomiendas" (segunda persona)
+2. `SUPERLATIVE_RE` no incluía "la/el mejor"
+3. La Regla 6 anti-fallback no filtraba entidades de tipo `day`
+
+**Fix:**
+- `RECOMMEND_RE`: `recomiend[ao](?:me)?` → `recomiend[ao](?:s|me|n)?`
+- `SUPERLATIVE_RE`: añadida alternativa `\b(?:el|la|los|las)\s+mejor(?:es)?\b`
+- Regla 6: añadido guard `context.lastEntity?.type !== 'day'`
+- Mismos fixes aplicados a `ragFilterService.classifyAIRequest()`
+
+#### Tabla de regresión — Sprint 13
+
+| Mensaje | Antes | Después |
+|---|---|---|
+| "que día abres?" | sin match (fallback IA) | intent `horarios` |
+| "cuando abres?" | sin match | intent `horarios` |
+| "que pizza me recomiendas?" (post-domingo) | error horarios via contexto día | RAG recomendación |
+| "que pizza es la mejor?" (post-domingo) | error horarios via contexto día | RAG recomendación |
+
+#### Problema resuelto
+Preguntas del tipo `"que hamburguesas tienen"`, `"que aguas tiene"` ya funcionaban (entidad detectada por el patrón `que X tienen`). Sin embargo, preguntas del tipo `"que tipo de hamburguesas tienen"` o `"que tipo de bebidas tiene"` no eran manejadas: el pipeline no extraía correctamente el candidato y caía en fallback de IA.
+
+#### Cambios
+
+**`entityDetector.js`**
+- Añadidos 2 patrones regex en `PRODUCT_QUERY_PATTERNS` para capturar `"que tipo(s) de X tienen/hay"` antes del patrón genérico `que X tienen`.
+- Añadido pre-check `TIPO_DE_RE` al inicio de `detectEntities()`: cuando el mensaje contiene `"que tipo(s) de X …"`, se consulta **categoría primero** (p. ej. "Bebidas") y solo si no hay match de categoría se consulta producto individual. Esto garantiza que `"que tipo de bebidas tiene"` devuelva la categoría completa en lugar de buscar un producto llamado "bebidas".
+
+**`messagePipeline.js`**
+- `decide()`: la Regla 2 ahora infiere `intent='productos'` para entidades de tipo `category` (antes solo lo hacía para `product`).
+- `executeDecision()`: nueva rama para `entity.type === 'category'` que carga la primera página paginada de productos, actualiza el contexto Redis (`paginationCategory`, `paginationOffset`, `paginationTotal`) y permite continuar con "ver más".
+
+**`intents.js`**
+- Añadidas keywords `"que tipo de"` (weight 2) y `"que tipos de"` (weight 2) al intent `productos`.
+
+#### Comportamiento resultante
+
+| Mensaje | Resultado |
+|---|---|
+| `"que hamburguesas tienen"` | Lista de productos que contienen "hamburguesa" |
+| `"que aguas tiene"` | Lista de productos que contienen "agua" |
+| `"que tipo de hamburguesas tienen"` | Categoría si existe, si no: lista de hamburguesas |
+| `"que tipo de bebidas tiene"` | Primera página de la categoría "Bebidas" |
+| `"que bebidas tiene"` | Primera página de la categoría "Bebidas" |
+| `"ver más"` (después de cualquiera) | Siguiente página de la misma categoría |
+
+---
+
 ### Sprint 8 — Formato de listas + paginación *(31 mar 2026)*
 
 #### Mejoras de formato
@@ -511,7 +750,7 @@ Singleton de socket.io-client. `getSessionId()` genera un UUID v4 con `crypto.ra
 
 ## 7. Testing
 
-**379 pruebas** en **12 suites** — todas pasan (`npm test`).
+**698 pruebas** en **14 suites** — todas pasan (`npm test`).
 
 ### Ejecutar los tests
 
@@ -526,26 +765,44 @@ npm run test:coverage    # Reporte HTML en ./coverage/
 
 | Archivo | Módulo cubierto | Aprox. casos |
 |---|---|---|
-| `businessInfoService.test.js` | QUERY_MAP, despacho, errores BD | 13 |
+| `businessInfoService.test.js` | QUERY_MAP, despacho, errores BD | ~13 |
 | `conversationalFlow.test.js` | Pipeline multi-turno, decide(), buildContextUpdate(), paginación | ~80 |
 | `dayDetector.test.js` | Detección de 7 días, word-boundary, sin match | ~15 |
-| `entityDetector.test.js` | 19 patrones regex, blocklist, formatters | ~50 |
+| `entityDetector.test.js` | 21 patrones regex, blocklist, formatters, TIPO_DE_RE | ~55 |
+| `hybridFlow.test.js` | shouldUseAI(), hasRelevantData(), classifyAIRequest(), filterRelevantData(), handleAIFallback(), processMessage(), regresiones de enrutamiento | ~88 |
 | `intentResponseFormatter.test.js` | formatList, 5 formatters, formatTime, fallbacks | ~35 |
-| `intentService.test.js` | 5 intents, scoring, edge cases | ~70 |
-| `keywordResponses.test.js` | Keywords, sin match, guards | 16 |
-| `messageModel.test.js` | create(), findByRoom(), clear() | 10 |
-| `mockOpenAI.test.js` | Sin contexto, con producto, con intent | ~20 |
+| `intentService.test.js` | 5 intents, scoring, edge cases, formas tu-persona | ~84 |
+| `keywordResponses.test.js` | Keywords, sin match, guards | ~16 |
+| `messageModel.test.js` | create(), findByRoom(), clear() | ~10 |
+| `mockOpenAI.test.js` | getMockOpenAIResponse, getRAGOpenAIResponse | ~25 |
 | `nlpEntityExtractor.test.js` | normalize(), patrones, blocklist, trigger, NLP | ~36 |
 | `normalize.test.js` | Funciones de normalización y variantes | ~15 |
 | `sessionContextService.test.js` | getContext/updateContext, TTL, merge parcial | ~30 |
+| `textPreprocessor.test.js` | expandAbbreviations, correctTypos, preprocessMessage | ~96 |
+
+### Describes de `hybridFlow.test.js`
+
+| Describe | Qué cubre |
+|---|---|
+| `shouldUseAI()` | Todas las reglas del motor de decisión |
+| `hasRelevantData()` | Casos de RAG context vacío vs con datos |
+| `classifyAIRequest()` | Clasificación en 5 tipos |
+| `extractComparisonEntities()` | Patrones "X o Y", "X vs Y", sin match |
+| `filterRelevantData()` | Ramas recommendation/comparison/empty |
+| `handleAIFallback()` | Flujo completo: keyword→decision→RAG→AI |
+| `processMessage() — hybrid flow` | Integración completa con BD mock |
+| `Bug-regression: entity detection MUST NOT block AI` | RECOMMEND_RE/COMPARE_RE antes de entidad |
+| `Bug-regression: complex questions MUST NOT reuse stale context entity` | SUPERLATIVE_RE/CAPACITY_RE |
+| `Bug-regression: queries after day context MUST NOT reuse day entity` | Guard `type !== 'day'` en Regla 6 |
+| `Anti-patterns: AI MUST NOT be used when backend can resolve` | Entidades/intents conocidos no van a IA |
 
 ### Mocking
 
 | Módulo | Test que lo mockea | Razón |
 |---|---|---|
-| `../../src/config/database` | `entityDetector`, `conversationalFlow`, `nlpEntityExtractor` | Evitar PostgreSQL real |
-| `ioredis` | `sessionContextService`, `conversationalFlow` | Evitar Redis real (Map en memoria) |
-| `../../src/models/businessModel` | `businessInfoService` | Aislar QUERY_MAP |
+| `../../src/config/database` | `entityDetector`, `conversationalFlow`, `nlpEntityExtractor`, `hybridFlow` | Evitar PostgreSQL real |
+| `ioredis` | `sessionContextService`, `conversationalFlow`, `hybridFlow` | Evitar Redis real (Map en memoria) |
+| `../../src/models/businessModel` | `businessInfoService`, `hybridFlow` | Aislar QUERY_MAP y queries RAG |
 
 ---
 
@@ -577,7 +834,8 @@ Secreto requerido: `CODECOV_TOKEN` (en Settings → Secrets → Actions).
 
 ### Agregar patrones de consulta de producto
 
-`entityDetector.js` → `PRODUCT_QUERY_PATTERNS[]`: agregar regex con `(?<entity>…)`.
+`entityDetector.js` → `PRODUCT_QUERY_PATTERNS[]`: agregar regex con `(?<entity>…)` **antes** del patrón genérico `que X tienen` para evitar que éste lo absorba.
+Si el nuevo patrón requiere consultar categoría antes que producto (como `"que tipo de X"`), agregar la lógica al bloque de pre-checks en `detectEntities()`.
 Si es un verbo/trigger nuevo, añadirlo a `PRODUCT_TRIGGER_WORDS`.
 
 ### Cambiar el límite de paginación
@@ -596,9 +854,14 @@ Si es un verbo/trigger nuevo, añadirlo a `PRODUCT_TRIGGER_WORDS`.
 
 ### Activar OpenAI real
 
+El flujo híbrido ya está implementado y funcional con un mock. Para conectar OpenAI real:
+
 1. `backend/.env` → `OPENAI_API_KEY=sk-…`
-2. Crear `src/services/openaiService.js`
-3. En `executeDecision()` de `messagePipeline.js`, reemplazar `getMockOpenAIResponse()` por `await openaiService.chat(text, context)`
+2. Crear `src/services/openaiService.js` que exporte `chat(userMessage, ragContext, sessionContext)`
+3. En `handleAIFallback()` de `messagePipeline.js`, reemplazar la llamada a `getRAGOpenAIResponse()` por `openaiService.chat(originalText, ragContext, context)`
+4. El prompt del sistema debe incluir los datos de `ragContext.data` (ya compactos/filtrados por `ragFilterService`) para aprovechar el contexto RAG
+
+> `ragFilterService.js` ya se encarga de traer sólo los datos relevantes (máx. 15 ítems). El formato de `ragContext` es `{ type, data[], summary, total }` — listo para serializar al prompt.
 
 ---
 

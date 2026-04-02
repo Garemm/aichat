@@ -41,7 +41,9 @@ const {
 } = require('./businessInfoService');
 const { formatIntentResponse, formatHorarioDay, formatList, formatDescripcionResponse } = require('./intentResponseFormatter');
 const { getKeywordResponse } = require('../mockai/keywordResponses');
-const { getMockOpenAIResponse } = require('../temp/mockOpenAI');
+const { getMockOpenAIResponse, getRAGOpenAIResponse } = require('../temp/mockOpenAI');
+const { shouldUseAI, hasRelevantData } = require('./aiDecisionEngine');
+const { filterRelevantData } = require('./ragFilterService');
 
 /** Minimum score to consider intent as "high confidence" (skip context). */
 const HIGH_CONFIDENCE_THRESHOLD = 3;
@@ -335,6 +337,22 @@ function decide(intentResult, entityResult, context, normalizedText) {
     };
   }
 
+  // Rule 1.5: AI pre-screen — recommendation/comparison patterns beat entity routing.
+  // "que me recomienda de postres?" detects entity "postres" but user wants
+  // AI reasoning, not a raw catalog. Ask shouldUseAI with the real entity so
+  // the (now-fixed) decision engine can bypass the entity guard when text
+  // explicitly signals a recommendation or comparison.
+  const aiPrescreen = shouldUseAI(normalizedText, intentResult, entityResult, context);
+  if (aiPrescreen.routing === 'ai') {
+    return {
+      strategy: 'ai',
+      intent: null,
+      entity: { type: null, value: null },
+      usedContext: false,
+      reason: `AI pre-screen: ${aiPrescreen.reason}`,
+    };
+  }
+
   // Rule 2: Clear entity detected in message → use it directly, NO context
   if (hasEntity) {
     // If we also have an intent, combine them; otherwise infer 'productos' for product/category entities
@@ -420,8 +438,11 @@ function decide(intentResult, entityResult, context, normalizedText) {
   // Rule 6: Anti-fallback — if there is valid context but no entity/intent could
   // be resolved from this message, prefer context over AI for short messages.
   // This handles ambiguous continuations like "y ese?" that isAmbiguous() misses.
-  // Skip if the last entity was a miss (would re-query a known-empty product).
+  // Skip if:
+  //   - the last entity was a miss (would re-query a known-empty product)
+  //   - the last entity is a 'day' type (temporal context must not contaminate product/recommendation queries)
   if (context.lastEntity?.value && context.lastEntityFound !== false &&
+      context.lastEntity?.type !== 'day' &&
       normalizedText.length >= 2 && normalizedText.length <= 40) {
     const hasNewTopic = normalizedText.split(/\s+/).some((w) =>
       ['horario', 'horarios', 'direccion', 'contacto', 'promos', 'promociones', 'descuentos'].includes(w)
@@ -672,6 +693,61 @@ async function executeDecision(decision, originalText, businessId, context, sess
   });
 }
 
+/**
+ * Hybrid AI handler: runs the AI decision engine + RAG filter, then
+ * either returns a backend fallback or a simulated OpenAI response.
+ *
+ * @param {string} originalText     Raw user message
+ * @param {string} normalizedText   Preprocessed text
+ * @param {number} businessId
+ * @param {{ intent: string|null, score: number, scores: object }} intentResult
+ * @param {{ type: string|null, value: string|null }}              entityResult
+ * @param {{ lastIntent: string|null, lastEntity: object }}        context
+ * @returns {Promise<{ text: string, aiUsed: boolean, ragContext: object|null }>}
+ */
+async function handleAIFallback(originalText, normalizedText, businessId, intentResult, entityResult, context) {
+  // Step 1: keyword responses always take priority (greetings, etc.)
+  const keyword = getKeywordResponse(originalText);
+  if (keyword) {
+    return { text: keyword, aiUsed: false, ragContext: null };
+  }
+
+  // Step 2: AI decision engine — should we even attempt AI?
+  const aiDecision = shouldUseAI(normalizedText, intentResult, entityResult, context);
+
+  if (aiDecision.routing === 'backend') {
+    // Backend fallback — use the old mock response (no AI needed)
+    const fallback = getMockOpenAIResponse(originalText, {
+      lastProduct: context?.lastEntity?.value ?? null,
+      lastIntent: context?.lastIntent ?? null,
+    });
+    return { text: fallback, aiUsed: false, ragContext: null };
+  }
+
+  // Step 3: RAG filter — fetch only relevant data before sending to AI
+  const ragContext = await filterRelevantData(
+    normalizedText, businessId, intentResult, entityResult, context
+  );
+
+  // Step 4: Guard — if no relevant data, don't waste an AI call
+  if (!hasRelevantData(ragContext)) {
+    const fallback = getMockOpenAIResponse(originalText, {
+      lastProduct: context?.lastEntity?.value ?? null,
+      lastIntent: context?.lastIntent ?? null,
+    });
+    return { text: fallback, aiUsed: false, ragContext };
+  }
+
+  // Step 5: Simulated OpenAI call with RAG context
+  // In production: replace getRAGOpenAIResponse with actual OpenAI API call
+  const aiResponse = getRAGOpenAIResponse(originalText, ragContext, {
+    lastIntent: context?.lastIntent ?? null,
+    lastEntity: context?.lastEntity ?? null,
+  });
+
+  return { text: aiResponse, aiUsed: true, ragContext };
+}
+
 // ─── Full pipeline ────────────────────────────────────────────────────────────
 
 /**
@@ -717,8 +793,31 @@ async function processMessage({ text, sessionId, businessId }) {
 
   console.log('[Pipeline]', JSON.stringify(logs, null, 2));
 
-  // 6. Execute decision → response
-  const replyText = await executeDecision(decision, text, businessId, context, sessionId);
+  // 6. Execute decision → response (hybrid: backend-first, AI as last resort)
+  let replyText;
+  let aiUsed = false;
+  let ragContext = null;
+
+  if (decision.strategy === 'ai') {
+    // Hybrid AI path: decision engine + RAG filter + simulated OpenAI
+    const aiResult = await handleAIFallback(
+      text, normalizedText, businessId, intentResult, entityResult, context
+    );
+    replyText = aiResult.text;
+    aiUsed = aiResult.aiUsed;
+    ragContext = aiResult.ragContext;
+  } else {
+    // Deterministic backend path
+    replyText = await executeDecision(decision, text, businessId, context, sessionId);
+  }
+
+  // Enrich logs with AI routing info
+  logs.aiUsed = aiUsed;
+  if (ragContext) {
+    logs.ragType = ragContext.type;
+    logs.ragDataCount = ragContext.data?.length ?? 0;
+    logs.ragSummary = ragContext.summary;
+  }
 
   // 7. Update context
   // When a product entity was detected but NOT found in DB:
@@ -750,6 +849,7 @@ module.exports = {
   decide,
   buildContextUpdate,
   executeDecision,
+  handleAIFallback,
   isAmbiguous,
   extractFollowUpEntity,
   HIGH_CONFIDENCE_THRESHOLD,

@@ -43,7 +43,15 @@ const intents = {
       { phrase: 'que horario manejan', weight: 3 },
       { phrase: 'me pueden decir el horario', weight: 3 },
       { phrase: 'a que hora puedo ir', weight: 3 },
+      // Segunda persona singular (tú): "a qué hora abres?", "qué día abres?"
+      { phrase: 'a que hora abres', weight: 3 },
+      { phrase: 'a que hora cierras', weight: 3 },
+      { phrase: 'que dias abres', weight: 3 },
+      { phrase: 'que dia abres', weight: 3 },
+      { phrase: 'que dias vendes', weight: 3 },
       // Frases parciales (weight 2)
+      { phrase: 'cuando abres', weight: 2 },
+      { phrase: 'cuando cierras', weight: 2 },
       { phrase: 'cuando abren', weight: 2 },
       { phrase: 'cuando cierran', weight: 2 },
       { phrase: 'horario del negocio', weight: 2 },
@@ -61,6 +69,8 @@ const intents = {
       { phrase: 'horarios', weight: 1 },
       { phrase: 'horario', weight: 1 },
       { phrase: 'abren', weight: 1 },
+      { phrase: 'abres', weight: 1 },
+      { phrase: 'cierras', weight: 1 },
     ],
   },
 

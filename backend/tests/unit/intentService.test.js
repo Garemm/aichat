@@ -22,6 +22,7 @@ describe('detectIntent()', () => {
   // ── horarios ────────────────────────────────────────────────────────────────
   describe('intent: horarios', () => {
     const HORARIOS_CASES = [
+      // Formas plurales (ya existentes)
       'cuando abren?',
       'Cuando Abren',
       'cuándo abren',          // with accent
@@ -40,6 +41,22 @@ describe('detectIntent()', () => {
       'cuales son sus horarios',
       'abren hoy',
       'abren mañana',
+      // Segunda persona singular — bug-regression
+      'que dia abres',
+      '¿Qué día abres?',       // with accents + punctuation
+      'que dias abres',
+      '¿Qué días abres?',
+      'cuando abres',
+      '¿Cuándo abres?',
+      'a que hora abres',
+      '¿A qué hora abres?',
+      'a que hora cierras',
+      '¿A qué hora cierras?',
+      'cuando cierras',
+      '¿Cuándo cierras?',
+      // Días de venta = horario de operación
+      'que dias vendes',
+      '¿Qué días vendes?',
     ];
 
     test.each(HORARIOS_CASES)('"%s" → horarios', (msg) => {
