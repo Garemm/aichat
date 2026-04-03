@@ -549,3 +549,180 @@ textarea { resize: vertical; }
   flex-shrink: 0;
 }
 .toast__close:hover { opacity: 1; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   RESPONSIVE DESIGN
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Hamburger (hidden on desktop) ────────────────────────────────────────── */
+.navbar__hamburger {
+  display: none;
+  background: none;
+  border: none;
+  color: var(--text-2);
+  padding: 4px;
+  border-radius: var(--radius-sm);
+  margin-right: 8px;
+  flex-shrink: 0;
+  transition: background .15s;
+}
+.navbar__hamburger:hover { background: var(--bg); }
+
+/* ── Sidebar close button (hidden on desktop) ─────────────────────────────── */
+.sidebar__close {
+  display: none;
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: var(--sidebar-text);
+  opacity: .6;
+  padding: 2px;
+  border-radius: 4px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.sidebar__close:hover { opacity: 1; background: var(--sidebar-hover); }
+
+/* ── Backdrop ─────────────────────────────────────────────────────────────── */
+.sidebar-backdrop {
+  display: none;
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+   TABLET / MOBILE  ≤ 900px → hamburger appears
+   ─────────────────────────────────────────────────────────────────────────── */
+@media (max-width: 900px) {
+
+  /* Sidebar becomes a fixed overlay drawer */
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    height: 100%;
+    z-index: 200;
+    transform: translateX(-100%);
+    transition: transform .25s cubic-bezier(.4,0,.2,1);
+    box-shadow: none;
+  }
+  .admin-layout.sidebar-open .sidebar {
+    transform: translateX(0);
+    box-shadow: var(--shadow-lg);
+  }
+
+  /* Backdrop */
+  .sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 199;
+    backdrop-filter: blur(2px);
+  }
+
+  /* Sidebar close button visible */
+  .sidebar__close { display: flex; }
+
+  /* Hamburger button visible */
+  .navbar__hamburger { display: flex; }
+
+  /* Main area takes full width (sidebar no longer in flow) */
+  .admin-layout__main { width: 100%; }
+
+  /* Navbar */
+  .navbar { padding: 12px 16px; display: flex; align-items: center; }
+  .navbar__title { font-size: .95rem; }
+
+  /* Content padding */
+  .admin-layout__content { padding: 16px; }
+
+  /* Page */
+  .page { max-width: 100%; }
+  .page__header { flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
+  .page__header h2 { font-size: 1.15rem; }
+
+  /* Stats: 2 columns on tablet */
+  .stats-grid { grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px; }
+
+  /* Filter bar: allow wrapping */
+  .filter-bar { gap: 8px; }
+  .filter-bar__search { max-width: 100%; flex: 1 1 160px; }
+  .filter-bar__select { flex: 1 1 120px; width: auto; }
+  .filter-bar__input--short { max-width: 90px; }
+
+  /* Forms */
+  .form-card { padding: 18px; }
+  .form-row  { grid-template-columns: 1fr; }
+
+  /* Table wrapper: horizontal scroll so table stays readable */
+  .table-wrapper { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .data-table { min-width: 500px; }
+  .data-table th, .data-table td { padding: 10px 12px; font-size: .82rem; }
+
+  /* Hours table time inputs */
+  .form-input--time { min-width: 100px; }
+
+  /* Info card */
+  .info-card { max-width: 100%; }
+  .info-row__label { width: 100px; }
+
+  /* Login */
+  .login-card { width: 90%; max-width: 400px; padding: 28px 22px; }
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+   PHONE  ≤ 480px
+   ─────────────────────────────────────────────────────────────────────────── */
+@media (max-width: 480px) {
+
+  :root { font-size: 13px; }
+
+  /* Stats: single column */
+  .stats-grid { grid-template-columns: 1fr; }
+  .stat-card { padding: 14px 16px; }
+  .stat-card__icon { width: 38px; height: 38px; }
+  .stat-card__value { font-size: 1.6rem; }
+
+  /* Content padding */
+  .admin-layout__content { padding: 12px; }
+
+  /* Page header: stack title above button */
+  .page__header { flex-direction: column; align-items: flex-start; }
+  .page__header > .btn { align-self: flex-start; }
+
+  /* Button text shrink */
+  .btn { font-size: .82rem; padding: 8px 14px; }
+  .btn--sm { padding: 5px 10px; font-size: .78rem; }
+
+  /* Filter bar: full-width stack */
+  .filter-bar { flex-direction: column; }
+  .filter-bar__search { max-width: 100%; min-width: unset; }
+  .filter-bar__select { width: 100%; }
+  .filter-bar__input--short { max-width: 100%; }
+
+  /* Table: make action column buttons icon-only */
+  .table-actions { gap: 4px; }
+
+  /* Forms */
+  .form-card { padding: 14px; gap: 14px; }
+  .form-actions { flex-direction: column; }
+  .form-actions .btn { width: 100%; justify-content: center; }
+
+  /* Hours table: compact */
+  .hours-table td, .hours-table th { padding: 8px; }
+  .hours-table .form-input--time { min-width: 90px; font-size: .8rem; }
+
+  /* Info card */
+  .info-row { flex-direction: column; gap: 2px; padding: 12px 14px; }
+  .info-row__label { width: auto; font-size: .72rem; }
+
+  /* Login */
+  .login-card { width: 92%; padding: 24px 18px; gap: 12px; }
+  .login-card h1 { font-size: 1.3rem; }
+
+  /* Toast: full width */
+  .toast-container { left: 8px; right: 8px; top: 8px; }
+  .toast { min-width: unset; max-width: 100%; }
+
+  /* Navbar */
+  .navbar { padding: 10px 12px; }
+}

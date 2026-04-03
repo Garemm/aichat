@@ -11,7 +11,7 @@ const links = [
   { to: '/business',    label: 'Mi Negocio',   icon: 'business'    },
 ];
 
-const Sidebar = () => {
+const Sidebar = ({ onClose }) => {
   const { signOut } = useAuth();
   const navigate    = useNavigate();
 
@@ -20,17 +20,26 @@ const Sidebar = () => {
     navigate('/login', { replace: true });
   };
 
+  const handleNav = () => {
+    // Close sidebar on mobile after navigating
+    if (window.innerWidth < 768) onClose?.();
+  };
+
   return (
     <aside className="sidebar">
       <div className="sidebar__brand">
         <span className="sidebar__brand-dot" />
         Admin Panel
+        <button className="sidebar__close" onClick={onClose} aria-label="Cerrar menú">
+          <Icon name="x" size={18} />
+        </button>
       </div>
       <nav className="sidebar__nav">
         {links.map(({ to, label, icon }) => (
           <NavLink
             key={to}
             to={to}
+            onClick={handleNav}
             className={({ isActive }) => `sidebar__link${isActive ? ' sidebar__link--active' : ''}`}
           >
             <Icon name={icon} size={18} className="sidebar__link-icon" />

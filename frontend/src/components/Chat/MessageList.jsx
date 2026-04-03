@@ -6,7 +6,6 @@ const MessageList = () => {
   const { messages, username, typingUsers } = useChat();
   const bottomRef = useRef(null);
 
-  // Auto-scroll to the latest message
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, typingUsers]);
@@ -18,9 +17,12 @@ const MessageList = () => {
       ))}
 
       {typingUsers.length > 0 && (
-        <p className="typing-indicator">
-          {typingUsers.join(', ')} {typingUsers.length === 1 ? 'is' : 'are'} typing...
-        </p>
+        <div className="typing-dots">
+          <div className="typing-dots__bubble">
+            <span /><span /><span />
+          </div>
+          <span className="typing-dots__label">{typingUsers[0]} está escribiendo…</span>
+        </div>
       )}
 
       <div ref={bottomRef} />

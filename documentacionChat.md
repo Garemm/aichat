@@ -1,7 +1,8 @@
-# LLM Chat AI — Documentación del Proyecto
+# LLM Chat AI — Documentación del Proyecto (Chat)
 
-> Última actualización: 2 de abril de 2026 — Sprint 16 (atributos de producto, servicios del negocio, correcciones de flujo conversacional)
+> Última actualización: 3 de abril de 2026 — Sprint 17 (chat UI rediseño, fix envío mobile, color light theme)
 > Estado: desarrollo activo
+> Archivo: `documentacionChat.md`
 
 ---
 
@@ -117,21 +118,27 @@ aichat/
 │       └── ci.yml
 │
 └── frontend/
-    ├── index.html
+    ├── index.html              ← viewport-fit=cover para iOS Safari
     ├── vite.config.js
     └── src/
+        ├── App.css             ← sistema de diseño completo (light theme, dvh, safe-area)
         ├── App.jsx
-        ├── components/Chat/
-        │   ├── ChatWindow.jsx
-        │   ├── Message.jsx
-        │   ├── MessageInput.jsx
-        │   └── MessageList.jsx
+        ├── main.jsx
+        ├── components/
+        │   ├── BusinessSelector.jsx   ← selector de negocio con cards + letter-avatar
+        │   └── Chat/
+        │       ├── ChatWindow.jsx     ← header con avatar + estado "En línea"
+        │       ├── Message.jsx        ← burbuja con avatar para bot
+        │       ├── MessageInput.jsx   ← botón enviar con SVG, sin form (fix mobile)
+        │       └── MessageList.jsx    ← typing dots animados
         ├── context/
-        │   └── ChatContext.jsx
+        │   └── ChatContext.jsx        ← incluye businessName prop
         ├── hooks/
         │   └── useSocket.js
+        ├── pages/
+        │   └── ChatPage.jsx           ← lee nav state para businessName
         └── services/
-            └── socketService.js
+            └── socketService.js       ← UUID con getRandomValues (no requiere HTTPS)
 ```
 
 ---
@@ -640,7 +647,9 @@ Incluye un **timer de inactividad** (210 s): si el usuario no escribe durante es
 Componente de mensaje del frontend. Usa `white-space: pre-wrap` para que los `\n` del formateador se rendericen como saltos de línea en el navegador.
 
 ### `socketService.js`
-Singleton de socket.io-client. `getSessionId()` genera un UUID v4 con `crypto.randomUUID()` la primera vez y lo persiste en `sessionStorage` (cada pestaña tiene su propio contexto).
+Singleton de socket.io-client. `getSessionId()` genera un UUID v4 con una implementación propia basada en `crypto.getRandomValues()` (funciona tanto en `localhost` como en URLs de IP local vía HTTP sin HTTPS — a diferencia de `crypto.randomUUID()` que requiere un Secure Context). El UUID se persiste en `sessionStorage` (cada pestaña tiene su propio contexto).
+
+> **Nota:** `crypto.randomUUID()` lanza `SecurityError` en Safari/Chrome cuando la página se sirve desde `http://192.168.1.x` (no es un Secure Context). El generador actual usa `getRandomValues()` que no tiene esa restricción, garantizando que el chat funcione desde el celular en la red local sin HTTPS.
 
 ---
 
@@ -913,6 +922,44 @@ Cambios:
 
 ---
 
+### Sprint 17 — Chat UI rediseño + fix envío mobile *(3 abr 2026)*
+
+#### Feature A — Rediseño completo de la interfaz del chat
+
+Nueva paleta de colores light/blanca elegante (reemplaza el tema oscuro anterior):
+
+| Token CSS | Valor | Uso |
+|---|---|---|
+| `--bg` | `#f0eff8` | Fondo general (lavanda-blanco) |
+| `--surface` | `#ffffff` | Cards, header, input bar |
+| `--surface-2` | `#f5f4fc` | Fondo de burbujas ajenas, inputs |
+| `--accent` | `#5b50f5` | Indigo principal (botones, mis burbujas) |
+| `--text` | `#1a1833` | Texto principal (navy oscuro) |
+| `--success` | `#10b981` | Dot "En línea" |
+
+Cambios visuales:
+- `BusinessSelector.jsx` → cards con letter-avatar degradado, ciudad como subtítulo, pasa `{ name, city }` via navigation state
+- `ChatPage.jsx` → lógica `useLocation().state` para leer nombre del negocio; join form con logo emoji + `name-input` + `join-btn`
+- `ChatWindow.jsx` → header con `chat-header__avatar` (primera letra del negocio), nombre, dot de estado verde, badge `@usuario`
+- `Message.jsx` → `message__avatar` (28px) para mensajes del bot; `message__body` wrapper; `white-space: pre-wrap` movido a CSS
+- `MessageInput.jsx` → botón circular SVG (icono de avión), placeholder en español
+- `MessageList.jsx` → indicador de escritura con tres puntos animados (`bounce` keyframe) en lugar de texto plano
+- `App.css` → sistema completo: variables CSS, animaciones `fadeSlideUp`/`msgIn`/`bounce`, join-card con slide desde abajo en mobile, `100dvh` para viewport dinámico
+- `index.html` → `viewport-fit=cover` para iPhone notch/home indicator
+
+#### Feature B — Fix definitivo de envío de mensajes en iPhone/Android
+
+**Problema:** el mensaje no se enviaba al presionar el botón en iOS Safari.
+
+**Causa raíz:** `crypto.randomUUID()` requiere un Secure Context (HTTPS). Al acceder desde `http://192.168.1.3:5173` (LAN sin HTTPS) lanzaba `SecurityError` silencioso → `sessionId = undefined` → el backend rechazaba el mensaje con `"sessionId requerido"` sin ningún error visible en pantalla.
+
+**Fix:**
+- `socketService.js` → función interna `generateUUID()` usando `crypto.getRandomValues()` (sin restricción de Secure Context)
+- `MessageInput.jsx` → eliminado `disabled` nativo (bloquea todos los eventos en iOS); usa `aria-disabled` + `onTouchStart` con `e.preventDefault()` para disparar antes del blur + `onClick` como fallback desktop; texto en ref (`textRef`) para evitar closures stale
+- `App.css` → `touch-action: manipulation` en `.send-btn` elimina el delay de 300ms en Android
+
+---
+
 ### Sprint 8 — Formato de listas + paginación *(31 mar 2026)*
 
 #### Mejoras de formato
@@ -1096,6 +1143,7 @@ npm run dev            # Vite en puerto 5173
 | PC | http://localhost:5173 |
 | Celular (misma Wi-Fi) | http://192.168.1.3:5173 |
 
+> La app funciona desde el celular en HTTP plano (sin HTTPS) gracias al fix de `crypto.getRandomValues()` en `socketService.js`.
 > Si cambia tu IP local, actualizar solo `CLIENT_URL` en `backend/.env`.
 
 

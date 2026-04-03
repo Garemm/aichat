@@ -15,6 +15,7 @@ const paths = {
   save:      'M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4',
   check:     'M5 13l4 4L19 7',
   x:         'M6 18L18 6M6 6l12 12',
+  menu:      'M4 6h16M4 12h16M4 18h16',
 };
 
 const Icon = ({ name, size = 18, className = '' }) => {

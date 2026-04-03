@@ -21,6 +21,22 @@ import { io } from 'socket.io-client';
 
 let socket = null;
 
+/**
+ * UUID v4 generator that works in ALL browser contexts, including
+ * non-secure origins (HTTP over LAN). crypto.randomUUID() is restricted
+ * to secure contexts (HTTPS/localhost) and throws on iPhone when the app
+ * is accessed via a local IP over plain HTTP. crypto.getRandomValues() has
+ * no such restriction and is available everywhere.
+ */
+function generateUUID() {
+  const buf = new Uint8Array(16);
+  crypto.getRandomValues(buf);
+  buf[6] = (buf[6] & 0x0f) | 0x40; // version 4
+  buf[8] = (buf[8] & 0x3f) | 0x80; // variant RFC 4122
+  const h = [...buf].map((b) => b.toString(16).padStart(2, '0')).join('');
+  return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;
+}
+
 const socketService = {
   /**
    * Obtiene o genera el sessionId para la pestaña actual.
@@ -30,8 +46,7 @@ const socketService = {
   getSessionId() {
     let sessionId = sessionStorage.getItem('chat_session_id');
     if (!sessionId) {
-      // crypto.randomUUID() es nativa en navegadores modernos (Chrome 92+, Firefox 95+, Safari 15.4+)
-      sessionId = crypto.randomUUID();
+      sessionId = generateUUID();
       sessionStorage.setItem('chat_session_id', sessionId);
     }
     return sessionId;

@@ -1,4 +1,5 @@
 import { useLocation } from 'react-router-dom';
+import Icon from '../components/ui/Icon';
 
 const TITLES = {
   '/dashboard':  'Dashboard',
@@ -9,12 +10,15 @@ const TITLES = {
   '/business':   'Mi Negocio',
 };
 
-const Navbar = () => {
+const Navbar = ({ onMenuClick }) => {
   const { pathname } = useLocation();
   const title = TITLES[pathname] ?? 'Admin';
 
   return (
     <header className="navbar">
+      <button className="navbar__hamburger" onClick={onMenuClick} aria-label="Abrir menú">
+        <Icon name="menu" size={22} />
+      </button>
       <h1 className="navbar__title">{title}</h1>
     </header>
   );
