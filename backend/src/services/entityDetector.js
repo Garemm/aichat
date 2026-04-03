@@ -227,7 +227,7 @@ function extractEntityCandidate(normalizedText) {
 async function queryProducts(entity, businessId) {
   // Build variants: "cuadernos" → search "cuadernos" OR "cuaderno"
   const variants = wordVariants(entity);
-  const conditions = variants.map((_, i) => `p.name ILIKE $${i + 2}`);
+  const conditions = variants.map((_, i) => `translate(LOWER(p.name), '\u00e1\u00e9\u00ed\u00f3\u00fa\u00fc', 'aeiouu') ILIKE $${i + 2}`);
   const params = [businessId, ...variants.map((v) => `%${v}%`)];
 
   const result = await db.query(
@@ -240,7 +240,7 @@ async function queryProducts(entity, businessId) {
      WHERE p.business_id = $1
        AND (${conditions.join(' OR ')})
      ORDER BY
-       CASE WHEN LOWER(p.name) = LOWER($${params.length + 1}) THEN 0 ELSE 1 END,
+       CASE WHEN translate(LOWER(p.name), '\u00e1\u00e9\u00ed\u00f3\u00fa\u00fc', 'aeiouu') = $${params.length + 1} THEN 0 ELSE 1 END,
        p.name ASC
      LIMIT 5`,
     [...params, entity]
@@ -256,7 +256,7 @@ async function queryProducts(entity, businessId) {
  */
 async function queryCategories(entity, businessId) {
   const variants = wordVariants(entity);
-  const conditions = variants.map((_, i) => `c.name ILIKE $${i + 2}`);
+  const conditions = variants.map((_, i) => `translate(LOWER(c.name), '\u00e1\u00e9\u00ed\u00f3\u00fa\u00fc', 'aeiouu') ILIKE $${i + 2}`);
   const params = [businessId, ...variants.map((v) => `%${v}%`)];
 
   const result = await db.query(

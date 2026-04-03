@@ -25,6 +25,7 @@ const useSocket = () => {
   const {
     roomId,
     username,
+    businessId,
     addMessage,
     setHistory,
     addTypingUser,
@@ -63,7 +64,7 @@ const useSocket = () => {
    */
   const sendMessage = (text) => {
     const sessionId = socketService.getSessionId();
-    socketService.getSocket().emit('send_message', { roomId, sender: username, text, sessionId });
+    socketService.getSocket().emit('send_message', { roomId, sender: username, text, sessionId, businessId });
   };
 
   const emitTyping = () => {

@@ -13,7 +13,7 @@ import React, { createContext, useContext, useState, useCallback } from 'react';
 
 const ChatContext = createContext(null);
 
-export const ChatProvider = ({ children }) => {
+export const ChatProvider = ({ children, businessId }) => {
   const [messages, setMessages]     = useState([]);
   const [roomId, setRoomId]         = useState('general');
   const [username, setUsername]     = useState('');
@@ -42,6 +42,7 @@ export const ChatProvider = ({ children }) => {
         roomId,
         username,
         typingUsers,
+        businessId,
         setRoomId,
         setUsername,
         addMessage,

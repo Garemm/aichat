@@ -31,17 +31,17 @@ function formatList(title, items) {
 
 const FORMATTERS = {
   horarios(rows) {
-    if (!rows || rows.length === 0) return 'No encontré información de horarios.';
+    if (!rows || rows.length === 0) return '¡Claro! Aunque por el momento no encontré horarios registrados. No dudes en contactarnos para más información 😊';
     const items = rows.map((r) => {
       const day = DAYS[r.day_of_week] ?? `Día ${r.day_of_week}`;
       if (r.is_closed) return `${day}: Cerrado 🔒`;
       return `${day}: ${formatTime(r.open_time)} – ${formatTime(r.close_time)}`;
     });
-    return formatList('🕐 Horarios de atención:', items);
+    return formatList('🕐 Nuestros Horarios de atención son:', items);
   },
 
   productos(rows) {
-    if (!rows || rows.length === 0) return 'No encontré productos disponibles.';
+    if (!rows || rows.length === 0) return '¡Mmm! No encontré productos disponibles en este momento. ¿Te gustaría intentar con una búsqueda diferente?';
     const byCat = new Map();
     for (const r of rows) {
       const key = r.category || 'General';
@@ -58,17 +58,17 @@ const FORMATTERS = {
       });
       sections.push(header + lines.join('\n'));
     }
-    return `📦 Productos disponibles:\n\n${sections.join('\n\n')}`;
+    return `📦 ¡Aquí te muestro nuestros productos disponibles!\n\n${sections.join('\n\n')}`;
   },
 
   precios(rows) {
-    if (!rows || rows.length === 0) return 'No encontré información de precios.';
+    if (!rows || rows.length === 0) return 'Por el momento no encontré información de precios. ¿Puedo ayudarte con algo más?';
     const items = rows.map((r) => `${r.name}: $${Number(r.price).toFixed(2)}`);
-    return formatList('💲 Lista de precios:', items);
+    return formatList('💲 Lista de precios actualizada:', items);
   },
 
   promociones(rows) {
-    if (!rows || rows.length === 0) return 'No hay promociones activas en este momento.';
+    if (!rows || rows.length === 0) return 'No hay promociones activas en este momento, ¡pero estate al pendiente! 😊 ¿Puedo ayudarte con algo más?';
     const items = rows.map((r) => {
       const value =
         r.discount_type === 'percentage'
@@ -81,19 +81,19 @@ const FORMATTERS = {
   },
 
   ubicacion(row) {
-    if (!row) return 'No encontré información de ubicación.';
-    return `📍 Ubicación:\n• Negocio: ${row.name}\n• Ciudad: ${row.city}\n• ${row.description}`;
+    if (!row) return '¡Ups! No encontré información de ubicación registrada. Contáctanos para darte los detalles 😊';
+    return `📍 ¡Aquí nos encuentras!\n• Negocio: ${row.name}\n• Ciudad: ${row.city}\n• ${row.description}`;
   },
 
   servicios(rows) {
-    if (!rows || rows.length === 0) return 'No hay servicios registrados.';
+    if (!rows || rows.length === 0) return 'Por el momento no tenemos servicios registrados. ¿Puedo ayudarte con algo más?';
     const items = rows.map((s) => {
       const price = s.price != null ? ` — $${Number(s.price).toFixed(2)}` : '';
       return `${s.name}${price}`;
     });
     return (
-      formatList('🛎️ Servicios disponibles:', items) +
-      '\n\n¿Te gustaría saber más sobre alguno de estos servicios?'
+      formatList('🛎️ Estos son los servicios que ofrecemos:', items) +
+      '\n\n¿Te gustaría saber más detalles sobre alguno de ellos?'
     );
   },
 };
@@ -106,7 +106,7 @@ const FORMATTERS = {
  */
 function formatIntentResponse(intent, data) {
   const formatter = FORMATTERS[intent];
-  if (!formatter) return `Información sobre "${intent}" no disponible.`;
+  if (!formatter) return `Información sobre "${intent}" no está disponible por ahora. ¿Puedo ayudarte con algo más?`;
   return formatter(data);
 }
 
@@ -124,9 +124,9 @@ function formatHorarioDay(normalizedDayKey, row) {
   };
   const display = DISPLAY[normalizedDayKey] ?? (normalizedDayKey.charAt(0).toUpperCase() + normalizedDayKey.slice(1));
 
-  if (!row) return `No encontré información de horarios para el ${display}.`;
-  if (row.is_closed) return `El ${display} estamos cerrados. 🔒`;
-  return `El ${display} abrimos de ${formatTime(row.open_time)} a ${formatTime(row.close_time)}. 🕐`;
+  if (!row) return `Hmm, no encontré horarios para el ${display}. ¿Quieres consultar otro día?`;
+  if (row.is_closed) return `El ${display} permanecemos cerrados. 🔒 ¡Te esperamos otro día!`;
+  return `El ${display} abrimos de ${formatTime(row.open_time)} a ${formatTime(row.close_time)}. 🕐 ¡Con gusto te atendemos!`;
 }
 
 /**
@@ -139,12 +139,12 @@ function formatHorarioDay(normalizedDayKey, row) {
  */
 function formatDescripcionResponse(entityValue, rows) {
   if (!rows || rows.length === 0) {
-    return `No encontré información sobre "*${entityValue}*". ¿Quieres ver el catálogo completo?`;
+    return `Hmm, no encontré información sobre "*${entityValue}*". ¿Quieres ver el catálogo completo?`;
   }
   const p = rows[0];
   const name = p.name ?? entityValue;
   if (!p.description) {
-    return `*${name}*: sin descripción detallada disponible.`;
+    return `*${name}* aún no tiene descripción detallada disponible. ¿Te gustaría saber su precio o disponibilidad?`;
   }
   return `*${name}*: ${p.description}`;
 }

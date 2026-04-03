@@ -344,7 +344,7 @@ describe('processMessage() — full pipeline', () => {
     mockDbNoMatch();
     const id = sid();
     // Pre-fill context with old entity
-    await updateContext(id, { lastEntity: { type: 'product', value: 'pizza' }, lastIntent: null });
+    await updateContext(BUSINESS_ID, id, { lastEntity: { type: 'product', value: 'pizza' }, lastIntent: null });
 
     const { decision } = await processMessage({ text: '¿A qué hora abren?', sessionId: id, businessId: BUSINESS_ID });
 
@@ -358,7 +358,7 @@ describe('processMessage() — full pipeline', () => {
     mockDbProductMatch('Laptop Gamer');
     const id = sid();
     // Pre-fill context with different product
-    await updateContext(id, { lastEntity: { type: 'product', value: 'pizza' }, lastIntent: 'horarios' });
+    await updateContext(BUSINESS_ID, id, { lastEntity: { type: 'product', value: 'pizza' }, lastIntent: 'horarios' });
 
     const { decision } = await processMessage({ text: '¿Tienen laptop?', sessionId: id, businessId: BUSINESS_ID });
 
@@ -418,10 +418,10 @@ describe('processMessage() — full pipeline', () => {
 
   test('TTL expiration: expired context → new message starts fresh', async () => {
     const id = sid();
-    await updateContext(id, { lastEntity: { type: 'product', value: 'pizza' }, lastIntent: 'precios' });
+    await updateContext(BUSINESS_ID, id, { lastEntity: { type: 'product', value: 'pizza' }, lastIntent: 'precios' });
 
     // Simulate TTL expiration
-    store.delete(`session:${id}`);
+    store.delete(`session:${BUSINESS_ID}:${id}`);
 
     mockDbNoMatch();
     const { decision } = await processMessage({ text: 'gracias', sessionId: id, businessId: BUSINESS_ID });
@@ -557,7 +557,7 @@ describe('General catalog query no hereda entidad de contexto', () => {
     await processMessage({ text: 'que productos tienes', sessionId: id, businessId: BUSINESS_ID });
 
     // Context entity must be cleared
-    const ctx = await getContext(id);
+    const ctx = await getContext(BUSINESS_ID, id);
     expect(ctx.lastEntity.value).toBeNull();
     expect(ctx.lastIntent).toBe('productos');
   });
@@ -625,7 +625,7 @@ describe('Escenario conversacional: 3 turnos con processMessage', () => {
     expect(t3.decision.entity.value).toBeNull();
 
     // Verify context after turn 3: entity cleared by standalone intent
-    const ctx = await getContext(id);
+    const ctx = await getContext(BUSINESS_ID, id);
     expect(ctx.lastIntent).toBe('horarios');
     expect(ctx.lastEntity).toEqual({ type: null, value: null });
   });
@@ -646,7 +646,7 @@ describe('Product not found → "sí" shows catalog', () => {
     expect(t1.replyText).toContain('no encontré');
 
     // Verify context keeps the entity (for follow-up refinement) but marks it as not-found
-    const ctxAfterT1 = await getContext(id);
+    const ctxAfterT1 = await getContext(BUSINESS_ID, id);
     expect(ctxAfterT1.lastIntent).toBe('productos');
     expect(ctxAfterT1.lastEntity.value).toBe('comida vegana');
     expect(ctxAfterT1.lastEntityFound).toBe(false);
@@ -673,7 +673,7 @@ describe('Product not found → "sí" shows catalog', () => {
     expect(t1.decision.strategy).toBe('entity');
 
     // Context should track the found entity normally
-    const ctx = await getContext(id);
+    const ctx = await getContext(BUSINESS_ID, id);
     expect(ctx.lastEntity).toEqual({ type: 'product', value: 'pizza' });
     expect(ctx.lastIntent).toBe('productos');
   });
@@ -847,7 +847,7 @@ describe('Horarios: detección de día en el mensaje', () => {
 
     await processMessage({ text: 'abren el lunes', sessionId: id, businessId: BUSINESS_ID });
 
-    const ctx = await getContext(id);
+    const ctx = await getContext(BUSINESS_ID, id);
     expect(ctx.lastIntent).toBe('horarios');
     expect(ctx.lastEntity.type).toBe('day');
     expect(ctx.lastEntity.value).toBe('lunes');
@@ -979,7 +979,7 @@ describe('Paginación: catálogo grande → categorías → paginación', () => 
 
     await processMessage({ text: 'que productos tienen', sessionId: id, businessId: BUSINESS_ID });
 
-    const ctx = await getContext(id);
+    const ctx = await getContext(BUSINESS_ID, id);
     expect(ctx.lastIntent).toBe('category_selection');
     expect(ctx.availableCategories).toEqual(CATEGORIES);
   });
@@ -989,7 +989,7 @@ describe('Paginación: catálogo grande → categorías → paginación', () => 
     const catProducts = makeProducts(15, 'Electrónica');
 
     // Seed context as if we already showed categories
-    await updateContext(id, {
+    await updateContext(BUSINESS_ID, id, {
       lastIntent: 'category_selection',
       availableCategories: CATEGORIES,
     });
@@ -1007,7 +1007,7 @@ describe('Paginación: catálogo grande → categorías → paginación', () => 
     const id = sid();
     const catProducts = makeProducts(15, 'Bebidas');
 
-    await updateContext(id, {
+    await updateContext(BUSINESS_ID, id, {
       lastIntent: 'category_selection',
       availableCategories: CATEGORIES,
     });
@@ -1023,7 +1023,7 @@ describe('Paginación: catálogo grande → categorías → paginación', () => 
     const id = sid();
     const catProducts = makeProducts(8, 'Accesorios');
 
-    await updateContext(id, {
+    await updateContext(BUSINESS_ID, id, {
       lastIntent: 'category_selection',
       availableCategories: CATEGORIES,
     });
@@ -1041,7 +1041,7 @@ describe('Paginación: catálogo grande → categorías → paginación', () => 
     const catProducts = makeProducts(20, 'Electrónica');
 
     // Seed pagination context
-    await updateContext(id, {
+    await updateContext(BUSINESS_ID, id, {
       lastIntent: 'productos',
       paginationCategory: 'Electrónica',
       paginationOffset: 0,
@@ -1061,7 +1061,7 @@ describe('Paginación: catálogo grande → categorías → paginación', () => 
     const id = sid();
     const catProducts = makeProducts(25, 'Electrónica');
 
-    await updateContext(id, {
+    await updateContext(BUSINESS_ID, id, {
       lastIntent: 'productos',
       paginationCategory: 'Electrónica',
       paginationOffset: 0,
@@ -1079,7 +1079,7 @@ describe('Paginación: catálogo grande → categorías → paginación', () => 
     const id = sid();
 
     // Seed pagination context
-    await updateContext(id, {
+    await updateContext(BUSINESS_ID, id, {
       lastIntent: 'productos',
       paginationCategory: 'Electrónica',
       paginationOffset: 0,
@@ -1098,7 +1098,7 @@ describe('Paginación: catálogo grande → categorías → paginación', () => 
     expect(decision.strategy).toBe('entity');
     expect(decision.entity.value).toBe('agua mineral');
 
-    const ctx = await getContext(id);
+    const ctx = await getContext(BUSINESS_ID, id);
     expect(ctx.paginationCategory).toBeNull();
     expect(ctx.availableCategories).toBeNull();
   });
@@ -1213,7 +1213,7 @@ describe('"tiene X" — detección verbo+entidad sin tienes/tienen', () => {
 
     await processMessage({ text: 'tiene hamburguesa', sessionId: id, businessId: BUSINESS_ID });
 
-    const ctx = await getContext(id);
+    const ctx = await getContext(BUSINESS_ID, id);
     expect(ctx.lastEntity.value).toBe('hamburguesa');
     expect(ctx.lastEntity.type).toBe('product');
   });
@@ -1321,7 +1321,7 @@ describe('Contexto: bare noun follow-up multi-turno', () => {
     expect(t2.decision.strategy).toBe('followup');
     expect(t2.decision.entity.value).toBe('pizza bbq');
 
-    const ctx = await getContext(id);
+    const ctx = await getContext(BUSINESS_ID, id);
     expect(ctx.lastEntity.value).toBe('pizza bbq');
   });
 
@@ -1345,7 +1345,7 @@ describe('Contexto: bare noun follow-up multi-turno', () => {
       return { rows: [] };
     });
     await processMessage({ text: 'tienen pizza', sessionId: id, businessId: BUSINESS_ID });
-    const ctx1 = await getContext(id);
+    const ctx1 = await getContext(BUSINESS_ID, id);
     expect(ctx1.lastEntity.value).toBe('pizza');
 
     // Turn 2: "que productos tienes" — intent=productos debe detectarse
@@ -1464,7 +1464,7 @@ describe('Disponibilidad de productos', () => {
 
     await processMessage({ text: '¿Está disponible la pizza pepperoni?', sessionId: id, businessId: BUSINESS_ID });
 
-    const ctx = await getContext(id);
+    const ctx = await getContext(BUSINESS_ID, id);
     expect(ctx.lastEntity.type).toBe('product');
     expect(ctx.lastEntity.value).toBe('pizza pepperoni');
   });
@@ -1623,7 +1623,7 @@ describe('Flujo completo: follow-up con "y / tambien / igual"', () => {
     });
     await processMessage({ text: 'y hamburguesa bbq', sessionId: id, businessId: BUSINESS_ID });
 
-    const ctx = await getContext(id);
+    const ctx = await getContext(BUSINESS_ID, id);
     expect(ctx.lastEntity.value).toBe('hamburguesa bbq');
     expect(ctx.lastEntity.type).toBe('product');
     expect(ctx.lastIntent).toBe('productos');
@@ -1659,7 +1659,7 @@ describe('Flujo completo: follow-up con "y / tambien / igual"', () => {
     const id = sid();
 
     // Manually seed context as if turn 1 partially saved entity
-    await updateContext(id, {
+    await updateContext(BUSINESS_ID, id, {
       lastEntity: { type: 'product', value: 'hamburguesa' },
       lastIntent: 'productos',
     });
@@ -1729,7 +1729,7 @@ describe('Flujo: primer resultado negativo → follow-up positivo con "y de X"',
     expect(t1.decision.strategy).toBe('entity');
     expect(t1.decision.entity.value).toBe('agua de limon');
     // Entity saved to context even when not found
-    const ctx1 = await getContext(id);
+    const ctx1 = await getContext(BUSINESS_ID, id);
     expect(ctx1.lastEntity.value).toBe('agua de limon');
 
     // Turn 2: "y de jamaica?" — enriquece con contexto → "agua de jamaica"
@@ -1754,7 +1754,7 @@ describe('Flujo: primer resultado negativo → follow-up positivo con "y de X"',
 
     await processMessage({ text: 'tienen agua de limon', sessionId: id, businessId: BUSINESS_ID });
 
-    const ctx = await getContext(id);
+    const ctx = await getContext(BUSINESS_ID, id);
     expect(ctx.lastEntity).toEqual({ type: 'product', value: 'agua de limon' });
     expect(ctx.lastIntent).toBe('productos');
   });
@@ -2092,7 +2092,7 @@ describe('Flujo: descripcion context → follow-up con artículo → no encontra
     expect(t2.replyText.toLowerCase()).toContain('no encontr');
 
     // Verify lastEntityFound=false so "sí" shows catalog
-    const ctxAfterT2 = await getContext(id);
+    const ctxAfterT2 = await getContext(BUSINESS_ID, id);
     expect(ctxAfterT2.lastEntityFound).toBe(false);
 
     // Turn 3: "sí" → debe mostrar catálogo (entity null), NO re-querying la torta
@@ -2397,7 +2397,7 @@ describe('Flujo catálogo → categorías → selección (2 turnos completos)', 
     expect(t1.replyText).toContain('Bebidas');
 
     // Contexto guardado correctamente tras turno 1
-    const ctx1 = await getContext(id);
+    const ctx1 = await getContext(BUSINESS_ID, id);
     expect(ctx1.lastIntent).toBe('category_selection');
     expect(ctx1.availableCategories).toEqual(CATS);
 
@@ -2411,7 +2411,7 @@ describe('Flujo catálogo → categorías → selección (2 turnos completos)', 
 
   test('turno 2: usuario escribe categoría en minúsculas → detecta igual', async () => {
     const id = sid();
-    await updateContext(id, {
+    await updateContext(BUSINESS_ID, id, {
       lastIntent: 'category_selection',
       availableCategories: CATS,
     });
@@ -2424,7 +2424,7 @@ describe('Flujo catálogo → categorías → selección (2 turnos completos)', 
 
   test('turno 2: categoría con acento (Electrónica) → detecta aunque usuario omita acento', async () => {
     const id = sid();
-    await updateContext(id, {
+    await updateContext(BUSINESS_ID, id, {
       lastIntent: 'category_selection',
       availableCategories: ['Electrónica', 'Accesorios', 'Cables'],
     });
@@ -2437,7 +2437,7 @@ describe('Flujo catálogo → categorías → selección (2 turnos completos)', 
 
   test('turno 2: usuario escribe frase que contiene nombre de categoría → detecta', async () => {
     const id = sid();
-    await updateContext(id, {
+    await updateContext(BUSINESS_ID, id, {
       lastIntent: 'category_selection',
       availableCategories: CATS,
     });
@@ -2450,7 +2450,7 @@ describe('Flujo catálogo → categorías → selección (2 turnos completos)', 
 
   test('turno 2: categoría con nombre largo → detecta con nombre parcial', async () => {
     const id = sid();
-    await updateContext(id, {
+    await updateContext(BUSINESS_ID, id, {
       lastIntent: 'category_selection',
       availableCategories: ['Tornillos y Fijaciones', 'Herramientas Manuales', 'Pinturas'],
     });
@@ -2465,7 +2465,7 @@ describe('Flujo catálogo → categorías → selección (2 turnos completos)', 
   test('turno 2: responde con los productos de la categoría seleccionada (no fallback AI)', async () => {
     const id = sid();
     const catProducts = makeProducts(3, 'Bebidas');
-    await updateContext(id, {
+    await updateContext(BUSINESS_ID, id, {
       lastIntent: 'category_selection',
       availableCategories: CATS,
     });
@@ -2487,7 +2487,7 @@ describe('Flujo catálogo → categorías → selección (2 turnos completos)', 
     const t1 = await processMessage({ text: '¿qué tienen?', sessionId: id, businessId: BUSINESS_ID });
     expect(t1.replyText).toContain('Hamburguesas');
 
-    const ctx = await getContext(id);
+    const ctx = await getContext(BUSINESS_ID, id);
     expect(ctx.lastIntent).toBe('category_selection');
 
     // Turno 2

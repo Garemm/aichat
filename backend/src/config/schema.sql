@@ -23,6 +23,7 @@ DROP TABLE IF EXISTS business_hours      CASCADE;
 DROP TABLE IF EXISTS product_attributes  CASCADE;
 DROP TABLE IF EXISTS product_inventory   CASCADE;
 DROP TABLE IF EXISTS products            CASCADE;
+DROP TABLE IF EXISTS admins              CASCADE;
 DROP TABLE IF EXISTS categories          CASCADE;
 DROP TABLE IF EXISTS businesses          CASCADE;
 
@@ -42,12 +43,25 @@ CREATE TABLE businesses (
 
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- admins
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE admins (
+    id          SERIAL        PRIMARY KEY,
+    username    VARCHAR(100)  NOT NULL UNIQUE,
+    password    VARCHAR(255)  NOT NULL,
+    business_id INT           NOT NULL REFERENCES businesses (id) ON DELETE CASCADE,
+    created_at  TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+);
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- categories  (self-referencing for nested categories)
 -- ─────────────────────────────────────────────────────────────────────────────
 CREATE TABLE categories (
-    id         SERIAL        PRIMARY KEY,
-    name       VARCHAR(255)  NOT NULL,
-    parent_id  INT           REFERENCES categories (id) ON DELETE SET NULL
+    id          SERIAL        PRIMARY KEY,
+    name        VARCHAR(255)  NOT NULL,
+    business_id INT           NOT NULL REFERENCES businesses (id) ON DELETE CASCADE,
+    parent_id   INT           REFERENCES categories (id) ON DELETE SET NULL
 );
 
 
@@ -157,6 +171,7 @@ CREATE TABLE messages (
 -- ─────────────────────────────────────────────────────────────────────────────
 CREATE INDEX idx_products_business_id       ON products            (business_id);
 CREATE INDEX idx_products_category_id       ON products            (category_id);
+CREATE INDEX idx_categories_business_id     ON categories          (business_id);
 CREATE INDEX idx_product_attributes_product ON product_attributes  (product_id);
 CREATE INDEX idx_business_hours_business    ON business_hours      (business_id);
 CREATE INDEX idx_promotions_business_id     ON promotions          (business_id);
@@ -165,6 +180,7 @@ CREATE INDEX idx_business_services_business ON business_services   (business_id)
 CREATE INDEX idx_conversations_business     ON conversations       (business_id);
 CREATE INDEX idx_messages_conversation      ON messages            (conversation_id);
 CREATE INDEX idx_messages_created_at        ON messages            (created_at);
+CREATE INDEX idx_admins_business_id         ON admins              (business_id);
 
 
 -- =============================================================================
@@ -184,33 +200,42 @@ SELECT setval('businesses_id_seq', 3);
 
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- ADMINS
+-- ─────────────────────────────────────────────────────────────────────────────
+INSERT INTO admins (username, password, business_id) VALUES
+('admin1', '123', 1),
+('admin2', '123', 2),
+('admin3', '123', 3);
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- CATEGORIES
 -- Parent categories: 1-3. Sub-categories per business below.
 -- ─────────────────────────────────────────────────────────────────────────────
-INSERT INTO categories (id, name, parent_id) VALUES
--- Restaurant root categories
-(1,  'Entradas',          NULL),
-(2,  'Platos Fuertes',    NULL),
-(3,  'Pizzas',            NULL),
-(4,  'Hamburguesas',      NULL),
-(5,  'Tacos y Antojitos', NULL),
-(6,  'Bebidas',           NULL),
-(7,  'Postres',           NULL),
--- Hardware root categories
-(8,  'Herramientas Manuales',   NULL),
-(9,  'Herramientas Eléctricas', NULL),
-(10, 'Materiales de Construcción', NULL),
-(11, 'Plomería',                NULL),
-(12, 'Electricidad',            NULL),
-(13, 'Pintura',                 NULL),
-(14, 'Seguridad',               NULL),
--- Stationery root categories
-(15, 'Cuadernos y Libretas',    NULL),
-(16, 'Escritura',               NULL),
-(17, 'Papelería General',       NULL),
-(18, 'Arte y Manualidades',     NULL),
-(19, 'Material Escolar',        NULL),
-(20, 'Tecnología de Oficina',   NULL);
+INSERT INTO categories (id, name, business_id, parent_id) VALUES
+-- Restaurant (business_id = 1)
+(1,  'Entradas',                     1, NULL),
+(2,  'Platos Fuertes',               1, NULL),
+(3,  'Pizzas',                       1, NULL),
+(4,  'Hamburguesas',                 1, NULL),
+(5,  'Tacos y Antojitos',            1, NULL),
+(6,  'Bebidas',                      1, NULL),
+(7,  'Postres',                      1, NULL),
+-- Hardware (business_id = 2)
+(8,  'Herramientas Manuales',        2, NULL),
+(9,  'Herramientas Eléctricas',      2, NULL),
+(10, 'Materiales de Construcción',   2, NULL),
+(11, 'Plomería',                     2, NULL),
+(12, 'Electricidad',                 2, NULL),
+(13, 'Pintura',                      2, NULL),
+(14, 'Seguridad',                    2, NULL),
+-- Stationery (business_id = 3)
+(15, 'Cuadernos y Libretas',         3, NULL),
+(16, 'Escritura',                    3, NULL),
+(17, 'Papelería General',            3, NULL),
+(18, 'Arte y Manualidades',          3, NULL),
+(19, 'Material Escolar',             3, NULL),
+(20, 'Tecnología de Oficina',        3, NULL);
 
 SELECT setval('categories_id_seq', 20);
 

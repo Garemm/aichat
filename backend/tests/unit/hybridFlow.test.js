@@ -1047,7 +1047,7 @@ describe('Anti-patterns: AI MUST NOT be used when backend can resolve', () => {
 
   test('ambiguous message with context → NO AI (uses context)', async () => {
     const id = sid();
-    await updateContext(id, { lastIntent: 'precios', lastEntity: { type: 'product', value: 'pizza' } });
+    await updateContext(BUSINESS_ID, id, { lastIntent: 'precios', lastEntity: { type: 'product', value: 'pizza' } });
 
     db.query.mockResolvedValue({ rows: [] });
     const { decision, logs } = await processMessage({ text: '¿y cuánto?', sessionId: id, businessId: BUSINESS_ID });

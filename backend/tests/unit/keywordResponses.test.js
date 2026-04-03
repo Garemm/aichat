@@ -19,19 +19,19 @@ const { getKeywordResponse } = require('../../src/mockai/keywordResponses');
 
 describe('getKeywordResponse() — known keywords', () => {
   test('"hola" returns greeting response', () => {
-    expect(getKeywordResponse('hola')).toBe('hola para ti tambien');
+    expect(getKeywordResponse('hola')).toBe('¡Hola! 👋 ¿En qué te puedo ayudar hoy?');
   });
 
   test('"como te llamas" returns name response', () => {
-    expect(getKeywordResponse('como te llamas')).toBe('me llamo LLM inicial');
+    expect(getKeywordResponse('como te llamas')).toBe('Soy tu asistente virtual 😊 Estoy aquí para ayudarte con cualquier pregunta sobre nuestros productos, horarios, precios, promociones y más. ¿En qué te puedo ayudar?');
   });
 
-  test('"¿como te llamas?" (with punctuation) returns name response', () => {
-    expect(getKeywordResponse('¿como te llamas?')).toBe('me llamo LLM inicial');
+  test('"\u00bfcomo te llamas?" (with punctuation) returns name response', () => {
+    expect(getKeywordResponse('\u00bfcomo te llamas?')).toBe('Soy tu asistente virtual 😊 Estoy aquí para ayudarte con cualquier pregunta sobre nuestros productos, horarios, precios, promociones y más. ¿En qué te puedo ayudar?');
   });
 
   test('"cómo te llamas" (with accent) returns name response', () => {
-    expect(getKeywordResponse('cómo te llamas')).toBe('me llamo LLM inicial');
+    expect(getKeywordResponse('cómo te llamas')).toBe('Soy tu asistente virtual 😊 Estoy aquí para ayudarte con cualquier pregunta sobre nuestros productos, horarios, precios, promociones y más. ¿En qué te puedo ayudar?');
   });
 });
 
@@ -39,15 +39,15 @@ describe('getKeywordResponse() — known keywords', () => {
 
 describe('getKeywordResponse() — case-insensitive matching', () => {
   test('"HOLA" matches', () => {
-    expect(getKeywordResponse('HOLA')).toBe('hola para ti tambien');
+    expect(getKeywordResponse('HOLA')).toBe('¡Hola! 👋 ¿En qué te puedo ayudar hoy?');
   });
 
   test('"Hola Mundo" matches', () => {
-    expect(getKeywordResponse('Hola Mundo')).toBe('hola para ti tambien');
+    expect(getKeywordResponse('Hola Mundo')).toBe('¡Hola! 👋 ¿En qué te puedo ayudar hoy?');
   });
 
   test('"Como Te Llamas" matches', () => {
-    expect(getKeywordResponse('Como Te Llamas')).toBe('me llamo LLM inicial');
+    expect(getKeywordResponse('Como Te Llamas')).toBe('Soy tu asistente virtual 😊 Estoy aquí para ayudarte con cualquier pregunta sobre nuestros productos, horarios, precios, promociones y más. ¿En qué te puedo ayudar?');
   });
 });
 
@@ -55,7 +55,7 @@ describe('getKeywordResponse() — case-insensitive matching', () => {
 
 describe('getKeywordResponse() — keyword inside a longer message', () => {
   test('sentence containing "hola" returns greeting response', () => {
-    expect(getKeywordResponse('oye hola que tal estas')).toBe('hola para ti tambien');
+    expect(getKeywordResponse('oye hola que tal estas')).toBe('¡Hola! 👋 ¿En qué te puedo ayudar hoy?');
   });
 });
 

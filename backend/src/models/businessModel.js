@@ -262,6 +262,19 @@ const BusinessModel = {
     );
     return result.rows;
   },
+
+  /**
+   * Returns all registered businesses (id, name, type, city).
+   * Used by the frontend BusinessSelector to populate the selection screen.
+   */
+  async getAllBusinesses() {
+    const result = await db.query(
+      `SELECT id, name, category, city
+       FROM businesses
+       ORDER BY id ASC`
+    );
+    return result.rows;
+  },
 };
 
 module.exports = BusinessModel;

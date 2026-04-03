@@ -9,8 +9,8 @@
 #
 # Jobs:
 #   1. lint     — Static analysis (ESLint)
-#   2. test     — Unit tests on Node 18 and 20 (matrix)
-#   3. coverage — Coverage report on Node 20 only, uploaded to Codecov
+#   2. test     — Unit tests on Node 22 and 24 (matrix)
+#   3. coverage — Coverage report on Node 22 only, uploaded to Codecov
 #
 # Secrets required (set in repo Settings → Actions → Secrets):
 #   CODECOV_TOKEN — obtained from codecov.io after connecting the repo
@@ -44,10 +44,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Node.js 20
+      - name: Set up Node.js 22
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           cache-dependency-path: backend/package-lock.json
 
@@ -60,7 +60,7 @@ jobs:
         # Remove "|| true" once ESLint is configured and rules are clean
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. Unit tests (matrix: Node 18 + 20)
+# 2. Unit tests (matrix: Node 22 + 24)
 # ─────────────────────────────────────────────────────────────────────────────
   test:
     name: Unit Tests (Node ${{ matrix.node-version }})
@@ -70,10 +70,11 @@ jobs:
     strategy:
       fail-fast: false           # Let both matrix legs finish before failing
       matrix:
-        node-version: [18, 20]
+        node-version: [22, 24]
 
     # ── Test environment variables (no real DB needed for unit tests) ──────────
     env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       NODE_ENV:    test
       DB_HOST:     localhost
       DB_PORT:     5432
@@ -108,7 +109,7 @@ jobs:
           if-no-files-found: ignore
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. Coverage report (Node 20 only)
+# 3. Coverage report (Node 22 only)
 # ─────────────────────────────────────────────────────────────────────────────
   coverage:
     name: Coverage Report
@@ -116,6 +117,7 @@ jobs:
     needs: test
 
     env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       NODE_ENV:    test
       DB_HOST:     localhost
       DB_PORT:     5432
@@ -128,10 +130,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Node.js 20
+      - name: Set up Node.js 22
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           cache-dependency-path: backend/package-lock.json
 

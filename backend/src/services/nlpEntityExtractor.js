@@ -253,10 +253,10 @@ async function queryProductByEntity(entity, businessId) {
      FROM products p
      LEFT JOIN product_inventory pi ON p.id = pi.product_id
      WHERE p.business_id = $1
-       AND p.name ILIKE $2
+       AND translate(LOWER(p.name), '\u00e1\u00e9\u00ed\u00f3\u00fa\u00fc', 'aeiouu') ILIKE $2
      ORDER BY
        -- Exact (normalized) match first, then partial
-       CASE WHEN LOWER(p.name) = LOWER($3) THEN 0 ELSE 1 END,
+       CASE WHEN translate(LOWER(p.name), '\u00e1\u00e9\u00ed\u00f3\u00fa\u00fc', 'aeiouu') = $3 THEN 0 ELSE 1 END,
        p.name ASC
      LIMIT 5`,
     [businessId, `%${entity}%`, entity]

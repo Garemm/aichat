@@ -11,7 +11,7 @@
  *   sessionId (UUID) generado en el frontend y enviado en cada mensaje.
  *
  * ESTRUCTURA EN REDIS:
- *   Key:   session:{sessionId}
+ *   Key:   session:{businessId}:{sessionId}
  *   Value: JSON → { lastIntent, lastEntity: { type, value }, updatedAt }
  *   TTL:   SESSION_TTL_SECONDS (210 s = 3.5 min), renovado con cada actualización
  *
@@ -22,9 +22,9 @@
  *   • Si Redis no está disponible, el chat degrada elegantemente sin contexto
  *
  * USO TÍPICO EN messagePipeline.js:
- *   const ctx = await getContext(sessionId);
+ *   const ctx = await getContext(businessId, sessionId);
  *   // ... lógica con ctx.lastEntity o ctx.lastIntent ...
- *   await updateContext(sessionId, { lastIntent: 'precios', lastEntity: { type: 'product', value: 'laptop' } });
+ *   await updateContext(businessId, sessionId, { lastIntent: 'precios', lastEntity: { type: 'product', value: 'laptop' } });
  */
 
 const redis = require('../config/redis');
@@ -34,11 +34,12 @@ const SESSION_TTL_SECONDS = 210;
 
 /**
  * Construye la clave de Redis con prefijo para evitar colisiones.
+ * @param {number|string} businessId
  * @param {string} sessionId
  * @returns {string}
  */
-function sessionKey(sessionId) {
-  return `session:${sessionId}`;
+function sessionKey(businessId, sessionId) {
+  return `session:${businessId}:${sessionId}`;
 }
 
 /** Empty context returned for new sessions or when Redis is unavailable. */
@@ -99,11 +100,12 @@ function _parseContext(raw) {
  * Recupera el contexto de una sesión desde Redis.
  * Si Redis no está disponible, utiliza el fallback en memoria del proceso.
  *
- * @param {string} sessionId  UUID generado en el frontend (sessionStorage)
+ * @param {number|string} businessId  ID del negocio activo
+ * @param {string} sessionId          UUID generado en el frontend (sessionStorage)
  * @returns {Promise<object>}
  */
-async function getContext(sessionId) {
-  const key = sessionKey(sessionId);
+async function getContext(businessId, sessionId) {
+  const key = sessionKey(businessId, sessionId);
   try {
     const raw = await redis.get(key);
     if (!raw) {
@@ -132,14 +134,15 @@ async function getContext(sessionId) {
  * Siempre escribe en memoria primero; luego intenta persistir en Redis.
  * Si Redis falla, el contexto queda disponible en el fallback en memoria.
  *
+ * @param {number|string} businessId  ID del negocio activo
  * @param {string} sessionId
  * @param {object} data  Campos a actualizar (merge parcial)
  * @returns {Promise<void>}
  */
-async function updateContext(sessionId, data) {
-  const key = sessionKey(sessionId);
+async function updateContext(businessId, sessionId, data) {
+  const key = sessionKey(businessId, sessionId);
   try {
-    const current = await getContext(sessionId);
+    const current = await getContext(businessId, sessionId);
     const updated = {
       ...current,
       ...data,

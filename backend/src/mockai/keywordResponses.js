@@ -8,11 +8,11 @@
 const responses = [
   {
     keywords: ["hola"],
-    response: "hola para ti tambien"
+    response: "¡Hola! 👋 ¿En qué te puedo ayudar hoy?"
   },
   {
     keywords: ["como te llamas", "¿como te llamas?", "cómo te llamas", "¿cómo te llamas?"],
-    response: "me llamo LLM inicial"
+    response: "Soy tu asistente virtual 😊 Estoy aquí para ayudarte con cualquier pregunta sobre nuestros productos, horarios, precios, promociones y más. ¿En qué te puedo ayudar?"
   }
 ];
 

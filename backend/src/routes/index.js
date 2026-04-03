@@ -8,11 +8,13 @@
  */
 
 const { Router } = require('express');
-const messageRoutes = require('./messageRoutes');
+const messageRoutes  = require('./messageRoutes');
+const businessRoutes = require('./businessRoutes');
 
 const router = Router();
 
 router.use('/messages', messageRoutes);
+router.use('/business', businessRoutes);
 
 // ── Future routes ─────────────────────────────────────────────────
 // router.use('/rooms',   roomRoutes);

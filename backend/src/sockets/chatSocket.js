@@ -20,15 +20,12 @@ const { getContext, updateContext, SESSION_TTL_SECONDS } = require('../services/
 const { getCategories } = require('../services/businessInfoService');
 const { formatList }    = require('../services/intentResponseFormatter');
 
-/** Negocio activo. TODO: enviar desde frontend para soporte multi-negocio. */
-const ACTIVE_BUSINESS_ID = 1;
-
 /** Milliseconds of inactivity before sending the re-engagement message.
  *  Matches SESSION_TTL_SECONDS so the message fires exactly when Redis context expires. */
 const IDLE_TIMEOUT_MS = SESSION_TTL_SECONDS * 1000;
 
 // ─── Idle timer tracking ──────────────────────────────────────────────────────
-// sessionTimers: sessionId → { roomId, timerId }
+// sessionTimers: sessionId → { roomId, businessId, timerId }
 // socketSessions: socket.id → sessionId   (needed to clear timer on disconnect)
 const sessionTimers  = new Map();
 const socketSessions = new Map();
@@ -39,8 +36,9 @@ const socketSessions = new Map();
  *
  * @param {string} sessionId
  * @param {string} roomId
+ * @param {number} businessId
  */
-function resetIdleTimer(sessionId, roomId) {
+function resetIdleTimer(sessionId, roomId, businessId) {
   // Cancel existing timer
   const existing = sessionTimers.get(sessionId);
   if (existing) clearTimeout(existing.timerId);
@@ -48,7 +46,7 @@ function resetIdleTimer(sessionId, roomId) {
   const timerId = setTimeout(async () => {
     sessionTimers.delete(sessionId);
     try {
-      const categories = await getCategories(ACTIVE_BUSINESS_ID);
+      const categories = await getCategories(businessId);
       if (!categories || categories.length === 0) return;
 
       const catList    = formatList('📂 Categorías disponibles:', categories);
@@ -57,7 +55,7 @@ function resetIdleTimer(sessionId, roomId) {
         `Te envío nuestro catálogo de categorías:\n\n${catList}`;
 
       // Set category_selection context so the next message routes correctly
-      await updateContext(sessionId, {
+      await updateContext(businessId, sessionId, {
         lastIntent:          'category_selection',
         availableCategories: categories,
       });
@@ -69,7 +67,7 @@ function resetIdleTimer(sessionId, roomId) {
     }
   }, IDLE_TIMEOUT_MS);
 
-  sessionTimers.set(sessionId, { roomId, timerId });
+  sessionTimers.set(sessionId, { roomId, businessId, timerId });
 }
 
 let io;
@@ -100,10 +98,15 @@ const initSocket = (httpServer) => {
     });
 
     // ── Send a message ───────────────────────────────────────────────────────
-    socket.on('send_message', async ({ roomId, sender, text, sessionId }) => {
+    socket.on('send_message', async ({ roomId, sender, text, sessionId, businessId }) => {
       try {
         if (!sessionId || typeof sessionId !== 'string') {
           socket.emit('error', { message: 'sessionId requerido' });
+          return;
+        }
+
+        if (!businessId || typeof businessId !== 'number') {
+          socket.emit('error', { message: 'businessId requerido' });
           return;
         }
 
@@ -118,7 +121,7 @@ const initSocket = (httpServer) => {
         const { replyText } = await processMessage({
           text,
           sessionId,
-          businessId: ACTIVE_BUSINESS_ID,
+          businessId,
         });
 
         // 3. Save and emit bot response
@@ -126,7 +129,7 @@ const initSocket = (httpServer) => {
         io.to(roomId).emit('receive_message', botMsg);
 
         // 4. Reset idle timer — clock starts from the last bot reply
-        resetIdleTimer(sessionId, roomId);
+        resetIdleTimer(sessionId, roomId, businessId);
 
       } catch (err) {
         socket.emit('error', { message: err.message });

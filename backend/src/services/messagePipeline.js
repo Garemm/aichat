@@ -129,7 +129,7 @@ function detectCategorySelection(normalizedText, availableCategories) {
  */
 function formatCategoryPrompt(categories) {
   const catList = formatList('📂 Categorías disponibles:', categories);
-  return `Tenemos muchos productos disponibles. ¿Buscas algo en específico?\n\n${catList}`;
+  return `Tenemos muchos productos disponibles 😊 ¿Estás buscando algo en particular?\n\n${catList}\n\nSólo díme la categoría que te interesa.`;
 }
 
 /**
@@ -150,9 +150,9 @@ function formatProductPage(rows, offset, total, category) {
   });
   const base = formatList(header, items);
   if (end < total) {
-    return `${base}\n\nEscribe *"ver más"* para ver los siguientes productos.`;
+    return `${base}\n\nEscribe *"ver más"* para continuar viendo los siguientes productos.`;
   }
-  return `${base}\n\n✅ Eso es todo en esta categoría.`;
+  return `${base}\n\n✅ ¡Eso es todo en esta categoría!`;
 }
 
 // ─── Ambiguity detection ──────────────────────────────────────────────────────
@@ -658,9 +658,9 @@ async function executeDecision(decision, originalText, businessId, context, sess
       const total  = context.paginationTotal ?? 0;
       const rows   = await getProductosByCategory(businessId, cat, PAGE_SIZE, offset);
       if (rows.length === 0) {
-        return `Ya no hay más productos en ${cat}. ¿Puedo ayudarte con algo más?`;
+        return `¡Listo! Aunque al parecer ya no hay más productos en ${cat}. ¿Puedo ayudarte con algo más?`;
       }
-      await updateContext(sessionId, { paginationOffset: offset });
+      await updateContext(businessId, sessionId, { paginationOffset: offset });
       return formatProductPage(rows, offset, total, cat);
     } catch (err) {
       console.error('[Pipeline] Error paginating products:', err.message);
@@ -673,7 +673,7 @@ async function executeDecision(decision, originalText, businessId, context, sess
       const cat   = decision.entity.value;
       const total = await countProductosByCategory(businessId, cat);
       const rows  = await getProductosByCategory(businessId, cat, PAGE_SIZE, 0);
-      await updateContext(sessionId, {
+      await updateContext(businessId, sessionId, {
         lastIntent: 'productos',
         lastEntity: { type: 'category', value: cat },
         paginationCategory: cat,
@@ -682,7 +682,7 @@ async function executeDecision(decision, originalText, businessId, context, sess
         availableCategories: null,
       });
       if (rows.length === 0) {
-        return `No encontré productos en la categoría "${cat}".`;
+        return `Hmm, parece que no tenemos productos en la categoría "${cat}". ¿Quieres explorar otra?`;
       }
       return formatProductPage(rows, 0, total, cat);
     } catch (err) {
@@ -734,7 +734,7 @@ async function executeDecision(decision, originalText, businessId, context, sess
     try {
       const rows = await queryProducts(decision.entity.value, businessId);
       if (rows.length === 0) {
-        return `Lo siento, no encontré el producto "*${decision.entity.value}*". ¿Quieres ver nuestro catálogo?`;
+        return `Mmm, no encontré el producto "*${decision.entity.value}*" en nuestro catálogo. ¿Te gustaría ver los productos disponibles?`;
       }
       const p = rows[0];
       let response = `El producto *${p.name}* cuesta $${Number(p.price).toFixed(2)}.`;
@@ -751,7 +751,7 @@ async function executeDecision(decision, originalText, businessId, context, sess
   // Description request: intent=descripcion → show product/service description
   if (decision.intent === 'descripcion') {
     if (!decision.entity?.value) {
-      return '¿Sobre qué producto o servicio deseas más información?';
+      return '¡Claro! ¿Sobre qué producto o servicio te gustaría saber más?';
     }
     try {
       const rows = await queryProducts(decision.entity.value, businessId);
@@ -777,7 +777,7 @@ async function executeDecision(decision, originalText, businessId, context, sess
         const cat   = decision.entity.value;
         const total = await countProductosByCategory(businessId, cat);
         const rows  = await getProductosByCategory(businessId, cat, PAGE_SIZE, 0);
-        await updateContext(sessionId, {
+        await updateContext(businessId, sessionId, {
           lastIntent: 'productos',
           lastEntity: { type: 'category', value: cat },
           paginationCategory: cat,
@@ -786,7 +786,7 @@ async function executeDecision(decision, originalText, businessId, context, sess
           availableCategories: null,
         });
         if (rows.length === 0) {
-          return `No encontré productos en la categoría "${cat}".`;
+          return `Hmm, no encontré productos en la categoría "${cat}". ¿Quieres explorar otra?`;
         }
         return formatProductPage(rows, 0, total, cat);
       } catch (err) {
@@ -940,7 +940,7 @@ async function processMessage({ text, sessionId, businessId }) {
     : await detectEntities(normalizedText, businessId, intentResult);
 
   // 5. Get context from Redis
-  const context = await getContext(sessionId);
+  const context = await getContext(businessId, sessionId);
 
   // 5b. Attribute follow-up: combine new attribute with previous search context
   // e.g. "algo con queso" → "y con pollo" → combine [queso, pollo]
@@ -1036,7 +1036,7 @@ async function processMessage({ text, sessionId, businessId }) {
       decision.entity?.type === 'product' &&
       decision.entity?.value &&
       typeof replyText === 'string' &&
-      (replyText.startsWith('Lo siento, no encontr') || replyText.startsWith('No encontr'));
+      replyText.toLowerCase().includes('no encontr');
 
     if (entityMissedViaDirect || entityMissedViaContext) {
       contextUpdate.lastEntityFound = false;
@@ -1044,7 +1044,7 @@ async function processMessage({ text, sessionId, businessId }) {
   }
 
   if (Object.keys(contextUpdate).length > 0) {
-    await updateContext(sessionId, contextUpdate);
+    await updateContext(businessId, sessionId, contextUpdate);
   }
 
   return { replyText, decision, logs };
