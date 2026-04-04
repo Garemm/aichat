@@ -24,6 +24,7 @@ const QUERY_MAP = {
   ubicacion:   (businessId) => BusinessModel.getUbicacion(businessId),
   servicios:   (businessId) => BusinessModel.getServices(businessId),
   comprar:     (businessId) => BusinessModel.getComprarInfo(businessId),
+  contacto:    (businessId) => BusinessModel.getContactoInfo(businessId),
 };
 
 /**

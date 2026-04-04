@@ -93,6 +93,8 @@ const PRODUCT_TRIGGER_WORDS = new Set([
   'precio', 'precios', 'cuesta', 'cuanto', 'vale', 'cobran', 'costo',
   // Description-query trigger words
   'contiene', 'incluye', 'trae', 'caracteristicas', 'especificaciones', 'descripcion',
+  // Catalog/menu trigger words
+  'catalogo', 'menu', 'lista', 'dame', 'muestrame',
 ]);
 
 function hasProductTrigger(normalizedText) {
@@ -112,6 +114,13 @@ const PRODUCT_QUERY_PATTERNS = [
   // "precio hamburguesa" / "precio agua de horchata" (bare price query, starts with "precio")
   /^precio\s+(?:de\s+)?(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
   /precio\s+de\s+(?:el\s+|la\s+|los\s+|un\s+|una\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
+  // ─── Catalog / menu queries — "dame el catálogo de X", "el menú de Y" ──────
+  // Must appear BEFORE the generic "me (pueden dar|das|traes) X" pattern so that
+  // "me das el catálogo de pizzas" is intercepted here (skipping the blocklisted
+  // word "catalogo") rather than below (where "catalogo" would kill the match).
+  /(?:dame?|muestrame?|pasame?)\s+(?:el\s+|la\s+)?(?:catalogo|menu|lista)\s+de\s+(?:el\s+|la\s+|los\s+|las\s+)?(?<entity>[\wñ\s]+?)(?:\?|$|\s+por\s+favor)/,
+  /me\s+(?:pueden\s+dar|das?|traes?)\s+(?:el\s+|la\s+)?(?:catalogo|menu|lista)\s+de\s+(?:el\s+|la\s+|los\s+|las\s+)?(?<entity>[\wñ\s]+?)(?:\?|$|\s+por\s+favor)/,
+  /(?:el\s+|la\s+)?(?:catalogo|menu|lista)\s+de\s+(?:el\s+|la\s+|los\s+|las\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
   /me\s+(?:pueden\s+dar|das?|traes?)\s+(?:el\s+|la\s+|un\s+|una\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
   // "puedes decirme si tienen X" / "me puedes decir si tienen X"
   /(?:me\s+)?puedes?\s+(?:decirme\s+)?(?:si\s+)?(?:tienen?|hay)\s+(?<entity>[\wñ\s]+?)(?:\?|$)/,
@@ -509,8 +518,8 @@ function formatProductResponse(entity, products) {
     const desc   = p.description ? `\n      📝 ${p.description}` : '';
     return `  • ${status} *${p.name}* — $${Number(p.price).toFixed(2)}${stock}${cat}${desc}`;
   });
-  return `🔍 Encontré *${products.length} resultados* para "*${entity}*":\n\n${lines.join('\n\n')}`;
-}
+  return `Tenemos *${products.length} tipos* de "*${entity}*":\n\n${lines.join('\n\n')}`;
+}//🔍 Encontré resultados para
 
 /**
  * Formats category query results — lists products in that category.

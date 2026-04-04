@@ -1,23 +1,55 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
 import useSocket from '../../hooks/useSocket';
+import VoiceButton from './VoiceButton';
 
 const TYPING_TIMEOUT_MS = 1500;
 
-const MessageInput = () => {
-  const [text, setText] = useState('');
-  // Mirror text in a ref so `send` can always read the latest value
-  // without needing `text` in its dependency array (avoids stale-closure
-  // issues caused by iOS blur → re-render race condition).
-  const textRef = useRef('');
+const SendIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2}
+    strokeLinecap="round" strokeLinejoin="round">
+    <line x1="22" y1="2" x2="11" y2="13" />
+    <polygon points="22 2 15 22 11 13 2 9 22 2" />
+  </svg>
+);
 
+const MessageInput = ({ voice }) => {
+  const [text, setText] = useState('');
+  const [focused, setFocused] = useState(false);
+  const textRef      = useRef('');
+  const typingTimer  = useRef(null);
   const { sendMessage, emitTyping, emitStopTyping } = useSocket();
-  const typingTimer = useRef(null);
+
+  // Destructure voice props with safe defaults
+  const {
+    isListening    = false,
+    startListening = null,
+    stopListening  = null,
+    cancelSpeak    = null,
+    transcript     = '',
+    clearTranscript = null,
+    sttSupported   = false,
+  } = voice || {};
+
+  // ── Auto-send STT transcript when it arrives ──────────────────────────
+  const sendMessageRef = useRef(sendMessage);
+  useEffect(() => { sendMessageRef.current = sendMessage; });
+
+  useEffect(() => {
+    if (!transcript) return;
+    const trimmed = transcript.trim();
+    if (!trimmed) return;
+    sendMessageRef.current(trimmed);
+    clearTranscript?.();
+    emitStopTyping();
+    clearTimeout(typingTimer.current);
+  }, [transcript]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleChange = useCallback(
     (e) => {
       const val = e.target.value;
       setText(val);
-      textRef.current = val;           // keep ref in sync
+      textRef.current = val;
       emitTyping();
       clearTimeout(typingTimer.current);
       typingTimer.current = setTimeout(emitStopTyping, TYPING_TIMEOUT_MS);
@@ -25,9 +57,6 @@ const MessageInput = () => {
     [emitTyping, emitStopTyping]
   );
 
-  // `send` never depends on `text` state — reads from ref instead.
-  // This means the function reference is stable and always operates on
-  // the latest typed value, regardless of render timing.
   const send = useCallback(() => {
     const trimmed = textRef.current.trim();
     if (!trimmed) return;
@@ -48,42 +77,85 @@ const MessageInput = () => {
     [send]
   );
 
-  // onTouchStart fires before the browser has a chance to blur the input
-  // or run any scroll logic. preventDefault stops the 300 ms synthetic
-  // click from firing afterward, so onClick won't double-fire on mobile.
   const handleTouchStart = useCallback(
-    (e) => {
-      e.preventDefault();
-      send();
-    },
+    (e) => { e.preventDefault(); send(); },
     [send]
   );
 
+  // ── Voice mic toggle ──────────────────────────────────────────────────
+  const handleVoiceToggle = useCallback(() => {
+    if (isListening) {
+      stopListening?.();
+    } else {
+      cancelSpeak?.();      // stop any TTS before recording
+      startListening?.();
+    }
+  }, [isListening, startListening, stopListening, cancelSpeak]);
+
+  const hasText = text.trim().length > 0;
+
   return (
-    <div className="message-input">
+    <motion.div
+      className={`message-input${focused ? ' message-input--focused' : ''}${isListening ? ' message-input--listening' : ''}`}
+      animate={{ boxShadow: isListening
+        ? '0 -2px 16px rgba(239,68,68,0.14)'
+        : focused
+          ? '0 -2px 16px rgba(91,80,245,0.12)'
+          : '0 -2px 8px rgba(0,0,0,0.04)'
+      }}
+      transition={{ duration: 0.25 }}
+    >
       <input
         type="text"
         value={text}
         onChange={handleChange}
         onKeyDown={handleKeyDown}
-        placeholder="Escribe un mensaje…"
+        onFocus={() => setFocused(true)}
+        onBlur={() => setFocused(false)}
+        placeholder={isListening ? 'Escuchando…' : 'Escribe un mensaje…'}
         autoComplete="off"
         maxLength={2000}
+        readOnly={isListening}
       />
-      <button
+      {sttSupported && (
+        <VoiceButton
+          isListening={isListening}
+          onToggle={handleVoiceToggle}
+        />
+      )}
+      <motion.button
         className="send-btn"
         type="button"
         aria-label="Enviar"
-        aria-disabled={!text.trim()}
+        aria-disabled={!hasText}
         onTouchStart={handleTouchStart}
         onClick={send}
+        whileHover={hasText ? { scale: 1.12 } : {}}
+        whileTap={hasText  ? { scale: 0.88 } : {}}
+        animate={{
+          background: hasText
+            ? 'linear-gradient(135deg, #5b50f5 0%, #8577ff 100%)'
+            : 'linear-gradient(135deg, #d8d6ee 0%, #e2e0f0 100%)',
+          boxShadow: hasText
+            ? '0 4px 14px rgba(91,80,245,0.35)'
+            : '0 1px 3px rgba(0,0,0,0.06)',
+        }}
+        transition={{ type: 'spring', stiffness: 400, damping: 17, background: { duration: 0.2 } }}
       >
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round">
-          <line x1="22" y1="2" x2="11" y2="13" />
-          <polygon points="22 2 15 22 11 13 2 9 22 2" />
-        </svg>
-      </button>
-    </div>
+        <AnimatePresence mode="wait" initial={false}>
+          <motion.span
+            key={hasText ? 'active' : 'idle'}
+            initial={{ opacity: 0, rotate: -15, scale: 0.7 }}
+            animate={{ opacity: 1, rotate: 0,   scale: 1   }}
+            exit={{    opacity: 0, rotate: 15,  scale: 0.7 }}
+            transition={{ duration: 0.15 }}
+            style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+          >
+            <SendIcon />
+          </motion.span>
+        </AnimatePresence>
+      </motion.button>
+    </motion.div>
   );
 };
 

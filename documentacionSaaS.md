@@ -1,6 +1,6 @@
 # LLM Chat AI — Documentación del Panel de Administración (SaaS)
 
-> Última actualización: 3 de abril de 2026
+> Última actualización: 3 de abril de 2026 — v1.3 (email/phone/webpage_link, Import Excel, categorías CRUD, Framer Motion)
 > Estado: desarrollo activo
 > Archivo: `documentacionSaaS.md`
 
@@ -51,6 +51,7 @@ admin-backend/
     │   ├── authController.js       ← POST /admin/login
     │   ├── businessController.js   ← GET|PUT /admin/business, GET /admin/dashboard
     │   ├── hoursController.js      ← GET|POST|DELETE /admin/hours
+    │   ├── importController.js     ← POST /admin/import/products (Excel → BD)
     │   ├── productController.js    ← CRUD /admin/products + /admin/categories
     │   ├── promotionController.js  ← CRUD /admin/promotions
     │   └── serviceController.js    ← CRUD /admin/services
@@ -77,7 +78,7 @@ admin-frontend/
     ├── main.jsx
     ├── components/
     │   ├── forms/
-    │   │   ├── BusinessForm.jsx    ← Formulario de información del negocio
+    │   │   ├── BusinessForm.jsx    ← Formulario del negocio (nombre, ciudad, dir, tel, email, web)
     │   │   ├── ProductForm.jsx     ← Formulario de producto (create/edit)
     │   │   ├── PromotionForm.jsx   ← Formulario de promoción
     │   │   └── ServiceForm.jsx     ← Formulario de servicio
@@ -93,8 +94,9 @@ admin-frontend/
     │   └── Sidebar.jsx             ← Menú lateral con íconos; auto-cierre en mobile
     ├── pages/
     │   ├── Dashboard.jsx           ← Stats: nº productos, servicios, promociones
-    │   ├── BusinessInfo.jsx        ← Editar nombre, ciudad, teléfono, dirección
+    │   ├── BusinessInfo.jsx        ← Editar nombre, ciudad, dirección, teléfono, email, página web
     │   ├── Hours.jsx               ← Horarios por día (7 días, toggle open/closed)
+    │   ├── Import.jsx              ← Importación masiva de productos desde Excel
     │   ├── Login.jsx               ← Pantalla de login
     │   ├── Products.jsx            ← Lista + filtro + CRUD de productos
     │   ├── Promotions.jsx          ← Lista + filtro + CRUD de promociones
@@ -226,8 +228,8 @@ Base URL de desarrollo: `http://localhost:4000`
 
 | Método | Ruta | Descripción | Body | Respuesta |
 |---|---|---|---|---|
-| `GET` | `/admin/business` | Obtener datos del negocio | — | `{ id, name, type, city, address, phone }` |
-| `PUT` | `/admin/business` | Actualizar datos | `{ name, city, address, phone, … }` | Registro actualizado |
+| `GET` | `/admin/business` | Obtener datos del negocio | — | `{ id, name, type, city, address, phone, email, webpage_link }` |
+| `PUT` | `/admin/business` | Actualizar datos | `{ name, city, address, phone, email, webpage_link }` | Registro actualizado |
 
 ### Categorías
 
@@ -287,7 +289,7 @@ Todos los modelos usan el pool `pg` de `config/database.js`. Cada método recibe
 | Método | Query |
 |---|---|
 | `findById(id)` | `SELECT * FROM businesses WHERE id = $1` |
-| `update(id, data)` | `UPDATE businesses SET … WHERE id = $1 RETURNING *` |
+| `update(id, data)` | `UPDATE businesses SET name, type, city, address, phone, email, webpage_link … WHERE id = $1 RETURNING *` (8 parámetros) |
 
 ### `productModel.js`
 
@@ -411,7 +413,7 @@ Muestra notificaciones flotantes (esquina inferior-derecha). Se auto-eliminan de
 
 **`Dashboard.jsx`** — tres tarjetas de stats (productos, servicios, promociones) obtenidas de `GET /admin/dashboard`. Muestra nombre y ciudad del negocio.
 
-**`BusinessInfo.jsx`** — formulario para editar los datos del negocio: nombre, tipo, ciudad, dirección, teléfono. Usa `BusinessForm.jsx`. Muestra spinner durante la carga y toast en éxito/error.
+**`BusinessInfo.jsx`** — formulario para editar los datos del negocio: nombre, tipo, ciudad, dirección, teléfono, email y página web. Usa `BusinessForm.jsx`. Muestra spinner durante la carga y toast en éxito/error.
 
 **`Products.jsx`** — lista completa de productos con búsqueda por texto (filter en el frontend). Abre `ProductForm.jsx` en un modal/drawer para crear o editar. Incluye botón de eliminar con confirmación.
 
@@ -574,6 +576,29 @@ Breakpoints en `@media (max-width: 900px)` y `@media (max-width: 480px)`:
 - `Navbar.jsx` — botón hamburger (visible solo en mobile)
 - `Sidebar.jsx` — prop `onClose`, botón `✕`, auto-cierre al navegar
 - CSS completo de responsive: drawer mobile, grid de stats adaptable, formularios compactos
+
+---
+
+### v1.3 — Importación Excel, Categorías, Framer Motion y contacto del negocio *(3 abr 2026)*
+
+#### Importación masiva de productos (Excel)
+
+- Nuevo `importController.js` — `POST /admin/import/products`: acepta archivo `.xlsx`, parsea las filas y crea/actualiza productos en lote
+- Nueva página `Import.jsx` — formulario para subir el archivo Excel; muestra progreso y resumen (creados / actualizados / errores)
+- **Bug fix:** se corrigió un bug por el que filas vacías ("phantom rows") al final del Excel generaban productos con nombre vacío en la BD
+
+#### Datos de contacto del negocio
+
+- `schema.sql` → columnas `email VARCHAR(255)`, `phone VARCHAR(50)`, `webpage_link VARCHAR(500)` en tabla `businesses`
+- `admin-backend/businessModel.js` → `findById` y `update` incluyen los 3 nuevos campos (8 parámetros en UPDATE)
+- `BusinessForm.jsx` → nuevos inputs: Email (`type="email"`), Teléfono (`type="tel"`), Página web (`type="url"`)
+- `BusinessInfo.jsx` → tres nuevas filas de detalle: Email, Teléfono, Página web
+- Los nuevos campos se usan en el chatbot para el intent `comprar` (`webpage_link`, `city`, `description`) y el intent `ubicacion` (ahora incluye `webpage_link`)
+
+#### Animaciones Framer Motion
+
+- `framer-motion` instalado en `admin-frontend`
+- Animaciones de entrada/salida en páginas, tablas y formularios
 
 ---
 

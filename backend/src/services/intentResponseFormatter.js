@@ -103,6 +103,20 @@ const FORMATTERS = {
     return lines.join('\n');
   },
 
+  contacto(row) {
+    if (!row) return '¡Ups! No encontré información de contacto registrada. Intenta de nuevo más tarde 😊';
+    const hasData = row.phone || row.email || row.webpage_link;
+    if (!hasData) return 'Por el momento no tenemos datos de contacto registrados. ¿Te puedo ayudar con algo más?';
+    const lines = [`📞 ¡Aquí tienes nuestros datos de contacto!`];
+    lines.push('');
+    if (row.phone)        lines.push(`📱 Teléfono: ${row.phone}`);
+    if (row.email)        lines.push(`✉️  Correo: ${row.email}`);
+    if (row.webpage_link) lines.push(`🌐 Sitio web: ${row.webpage_link}`);
+    lines.push('');
+    lines.push('¡Con gusto te atendemos! 😊');
+    return lines.join('\n');
+  },
+
   servicios(rows) {
     if (!rows || rows.length === 0) return 'Por el momento no tenemos servicios registrados. ¿Puedo ayudarte con algo más?';
     const items = rows.map((s) => {

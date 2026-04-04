@@ -14,17 +14,18 @@ import React, { createContext, useContext, useState, useCallback } from 'react';
 const ChatContext = createContext(null);
 
 export const ChatProvider = ({ children, businessId, businessName = '' }) => {
-  const [messages, setMessages]     = useState([]);
-  const [roomId, setRoomId]         = useState('general');
-  const [username, setUsername]     = useState('');
+  const [messages, setMessages]       = useState([]);
+  const [roomId, setRoomId]           = useState('general');
+  const [username, setUsername]       = useState('');
   const [typingUsers, setTypingUsers] = useState([]);
+  const [voiceEnabled, setVoiceEnabled] = useState(false);
 
   const addMessage = useCallback((message) => {
-    setMessages((prev) => [...prev, message]);
+    setMessages((prev) => [...prev, { ...message, isNew: true }]);
   }, []);
 
   const setHistory = useCallback((history) => {
-    setMessages(history);
+    setMessages(history.map((m) => ({ ...m, isNew: false })));
   }, []);
 
   const addTypingUser = useCallback((sender) => {
@@ -35,6 +36,8 @@ export const ChatProvider = ({ children, businessId, businessName = '' }) => {
     setTypingUsers((prev) => prev.filter((u) => u !== sender));
   }, []);
 
+  const toggleVoice = useCallback(() => setVoiceEnabled((v) => !v), []);
+
   return (
     <ChatContext.Provider
       value={{
@@ -44,12 +47,14 @@ export const ChatProvider = ({ children, businessId, businessName = '' }) => {
         typingUsers,
         businessId,
         businessName,
+        voiceEnabled,
         setRoomId,
         setUsername,
         addMessage,
         setHistory,
         addTypingUser,
         removeTypingUser,
+        toggleVoice,
       }}
     >
       {children}

@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import { AnimatePresence, motion } from 'framer-motion';
 import Message from './Message';
 import { useChat } from '../../context/ChatContext';
 
@@ -12,18 +13,29 @@ const MessageList = () => {
 
   return (
     <div className="message-list">
-      {messages.map((msg) => (
-        <Message key={msg.id} message={msg} currentUser={username} />
-      ))}
+      <AnimatePresence initial={false}>
+        {messages.map((msg) => (
+          <Message key={msg.id} message={msg} currentUser={username} />
+        ))}
+      </AnimatePresence>
 
-      {typingUsers.length > 0 && (
-        <div className="typing-dots">
-          <div className="typing-dots__bubble">
-            <span /><span /><span />
-          </div>
-          <span className="typing-dots__label">{typingUsers[0]} está escribiendo…</span>
-        </div>
-      )}
+      <AnimatePresence>
+        {typingUsers.length > 0 && (
+          <motion.div
+            key="typing-indicator"
+            className="typing-dots"
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 4, transition: { duration: 0.15 } }}
+            transition={{ duration: 0.2, ease: 'easeOut' }}
+          >
+            <div className="typing-dots__bubble">
+              <span /><span /><span />
+            </div>
+            <span className="typing-dots__label">{typingUsers[0]} está escribiendo…</span>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <div ref={bottomRef} />
     </div>

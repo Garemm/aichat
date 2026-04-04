@@ -1,6 +1,6 @@
 # LLM Chat AI — Documentación del Proyecto (Chat)
 
-> Última actualización: 3 de abril de 2026 — Sprint 17 (chat UI rediseño, fix envío mobile, color light theme)
+> Última actualización: 3 de abril de 2026 — Sprint 20 (voz STT+TTS, pronunciación de precios, intent comprar, email/phone/webpage_link en negocios)
 > Estado: desarrollo activo
 > Archivo: `documentacionChat.md`
 
@@ -25,6 +25,8 @@ El usuario escribe mensajes en español coloquial a través de una interfaz Reac
 - Preguntas generales sobre el catálogo ("que productos tienes", "que vendes") resetean el contexto previo de producto — nunca heredan la entidad anterior
 - **Flujo híbrido IA:** recomendaciones ("que me recomiendas"), comparaciones ("X vs Y"), superlativos ("la más barata", "la mejor"), preguntas de capacidad nutricional — ruteados a OpenAI con contexto RAG filtrado
 - Degrada elegantemente si Redis no está disponible (in-memory fallback automático)
+- Responde preguntas sobre cómo comprar o hacer pedidos (`comprar` intent, standalone): muestra si el negocio tiene tienda en línea (`webpage_link`), ciudad y descripción; reconoce ~22 frases ("quiero comprar", "como hago un pedido", "tienen tienda en línea", etc.)
+- **Voz (STT + TTS):** dictado por voz (Speech Recognition) y lectura automática de respuestas del bot (Speech Synthesis) usando APIs nativas del navegador — sin dependencias externas, privacidad total (ningún audio sale del dispositivo); compatible con iOS Safari, Chrome Desktop y Chrome Android
 
 ---
 
@@ -125,20 +127,24 @@ aichat/
         ├── App.jsx
         ├── main.jsx
         ├── components/
-        │   ├── BusinessSelector.jsx   ← selector de negocio con cards + letter-avatar
+        │   ├── BusinessSelector.jsx   ← selector de negocio con cards + letter-avatar (framer-motion)
         │   └── Chat/
-        │       ├── ChatWindow.jsx     ← header con avatar + estado "En línea"
-        │       ├── Message.jsx        ← burbuja con avatar para bot
-        │       ├── MessageInput.jsx   ← botón enviar con SVG, sin form (fix mobile)
-        │       └── MessageList.jsx    ← typing dots animados
+        │       ├── ChatWindow.jsx     ← header con avatar, estado "En línea", botón toggle TTS
+        │       ├── Message.jsx        ← burbuja con avatar para bot, typing effect
+        │       ├── MessageInput.jsx   ← STT (VoiceButton incluido), botón enviar SVG, fix mobile
+        │       ├── MessageList.jsx    ← typing dots animados (framer-motion)
+        │       └── VoiceButton.jsx    ← botón micrófono con anillos ripple (framer-motion)
         ├── context/
-        │   └── ChatContext.jsx        ← incluye businessName prop
+        │   └── ChatContext.jsx        ← voiceEnabled + toggleVoice añadidos
         ├── hooks/
-        │   └── useSocket.js
+        │   ├── useSocket.js
+        │   └── useVoice.js            ← STT (instancia fresca/sesión) + TTS (delega a speech.js)
         ├── pages/
-        │   └── ChatPage.jsx           ← lee nav state para businessName
-        └── services/
-            └── socketService.js       ← UUID con getRandomValues (no requiere HTTPS)
+        │   └── ChatPage.jsx           ← lee nav state para businessName, animaciones entrada
+        ├── services/
+        │   └── socketService.js       ← UUID con getRandomValues (no requiere HTTPS)
+        └── utils/
+            └── speech.js              ← TTS puro: pickBestVoice, prepareForSpeech, speakMessage
 ```
 
 ---
@@ -203,6 +209,7 @@ Motor: **PostgreSQL**. Esquema en `backend/src/config/schema.sql`.
 | 3  | Papelería La Pluma      | stationery  | Monterrey        |
 
 > El sistema trabaja con `business_id = 1` (`ACTIVE_BUSINESS_ID` en `chatSocket.js`).
+> La tabla `businesses` incluye también las columnas `email VARCHAR(255)`, `phone VARCHAR(50)` y `webpage_link VARCHAR(500)`, usadas por el intent `comprar` y administrables desde el panel SaaS.
 
 ---
 
@@ -561,7 +568,7 @@ Scoring de keywords contra `intents.js`. Cada keyword tiene un `weight`. El inte
 ### `intents.js`
 Árbol de 6 intenciones. Cada intent incluye `standalone: bool` y `keywords[]` con `{ phrase, weight }`. Los pesos tipicamente son 1–3; frases muy específicas como `"abren toda la semana"` tienen peso 3 para ganar siempre sobre palabras sueltas.
 
-**Intents disponibles:** `horarios`, `productos`, `precios`, `promociones`, `ubicacion`, `servicios`
+**Intents disponibles:** `horarios`, `productos`, `precios`, `promociones`, `ubicacion`, `servicios`, `comprar`
 
 | Intent | standalone | Notas |
 |--------|-----------|-------|
@@ -571,6 +578,7 @@ Scoring de keywords contra `intents.js`. Cada keyword tiene un `weight`. El inte
 | `promociones` | `true` | |
 | `ubicacion` | `true` | |
 | `servicios` | `true` | `que servicios ofrecen/tienen/manejan` (w3), `servicios disponibles` (w2), `servicios`/`servicio` (w1). Estas frases fueron **movidas** desde `productos` donde causaban conflicto de enrutamiento. |
+| `comprar` | `true` | ~22 keywords: "quiero comprar" (w3), "como compro" (w3), "tienda en linea" (w2), "pedido" (w1), etc. Responde con `webpage_link` + ciudad + descripción del negocio. |
 
 ### `intentResponseFormatter.js`
 Formateadores que convierten filas de la BD en texto con `\n`. Usa el helper interno `formatList(title, items)` que produce:
@@ -589,8 +597,9 @@ Un formateador por intent en el objeto `FORMATTERS`. Exporta:
 | `formatDescripcionResponse(entity, rows)` | Descripción de producto |
 | `formatProductAttributes(attrsMap, productId)` | Sección "✨ Características:" con atributos clave/valor. Devuelve `''` si el producto no tiene atributos. |
 | `formatServiceDetail(service)` | Tarjeta de un servicio específico: nombre + precio + descripción |
+| `FORMATTERS.comprar(row)` | Respuesta de compra con 🛒: muestra `webpage_link` (si no es null) + ciudad + descripción del negocio. |
 
-El `FORMATTERS` incluye `servicios(rows)` que genera una lista con precios e invita a preguntar por un servicio específico.
+El `FORMATTERS` incluye `servicios(rows)` que genera una lista con precios e invita a preguntar por un servicio específico, y `comprar(row)` que devuelve un mensaje 🛒 con info de compra (muestra `webpage_link` si existe) + ciudad + descripción del negocio.
 
 ### `businessModel.js`
 Queries SQL por intent + `business_id`. Métodos actuales:
@@ -605,13 +614,14 @@ Queries SQL por intent + `business_id`. Métodos actuales:
 | `getCategories` | `DISTINCT c.name` de productos disponibles |
 | `getPrecios` | `name, price ORDER BY price ASC` |
 | `getPromociones` | `promotions WHERE end_date >= CURRENT_DATE` |
-| `getUbicacion` | `businesses WHERE id = $1` |
+| `getUbicacion` | `businesses WHERE id = $1`; SELECT incluye `webpage_link` |
+| `getComprarInfo(businessId)` | `businesses SELECT name, description, city, webpage_link WHERE id = $1` |
 | `getProductAttributes(productIds[])` | `product_attributes WHERE product_id IN (…)` — devuelve mapa agrupado por `product_id` |
 | `getServices(businessId)` | `business_services WHERE business_id = $1 ORDER BY name` |
 | `getServiceByName(businessId, name)` | `business_services WHERE name ILIKE '%name%' LIMIT 5` |
 
 ### `businessInfoService.js`
-Despacha intent → `BusinessModel` via `QUERY_MAP`. El `QUERY_MAP` incluye los seis intents: `horarios`, `productos`, `precios`, `promociones`, `ubicacion`, `servicios`.
+Despacha intent → `BusinessModel` via `QUERY_MAP`. El `QUERY_MAP` incluye los **siete** intents: `horarios`, `productos`, `precios`, `promociones`, `ubicacion`, `servicios`, `comprar`.
 
 Exporta también: `getHorariosByDay`, `getCategories`, `getProductosByCategory`, `countProductosByCategory`, `getProductAttributes(productIds[])`, `getServiceByName(businessId, name)`.
 
@@ -650,6 +660,62 @@ Componente de mensaje del frontend. Usa `white-space: pre-wrap` para que los `\n
 Singleton de socket.io-client. `getSessionId()` genera un UUID v4 con una implementación propia basada en `crypto.getRandomValues()` (funciona tanto en `localhost` como en URLs de IP local vía HTTP sin HTTPS — a diferencia de `crypto.randomUUID()` que requiere un Secure Context). El UUID se persiste en `sessionStorage` (cada pestaña tiene su propio contexto).
 
 > **Nota:** `crypto.randomUUID()` lanza `SecurityError` en Safari/Chrome cuando la página se sirve desde `http://192.168.1.x` (no es un Secure Context). El generador actual usa `getRandomValues()` que no tiene esa restricción, garantizando que el chat funcione desde el celular en la red local sin HTTPS.
+
+### `speech.js` (`src/utils/`)
+Utilidades TTS puras (no React). Todo el procesamiento ocurre en el cliente — ningún audio sale del dispositivo.
+
+**Exports:**
+- `pickBestVoice()` — filtra las voces del navegador a español → prefiere premium (Google/Microsoft/Siri) → cascade de locales es-MX → es-ES → es-US → es-AR → cualquier "es". Devuelve `null` si no hay voz española (el navegador usa su default).
+- `prepareForSpeech(text)` — limpia texto de chat para sonar natural al ser hablado. Pipeline en orden:
+  1. Emojis y pictógrafos Unicode → espacio
+  2. Markdown (`*_~\``) → eliminar
+  3. Cascada de precio: `$120.00`→"120 pesos" | `$120.50`→"120 pesos con 50 centavos" | `$120`→"120 pesos" | `$` suelto→" pesos "
+  4. Bullets `•` → `, ` | dos puntos + espacio → `, ` | `\n\n` → `. ` | `\n` → `, `
+  5. Colapso de espacios + trim
+- `speakMessage(text, opts)` — TTS principal con fixes de plataforma:
+  - **iOS:** si `synthAPI.speaking === false` (idle) llama `doSpeak()` síncronamente (preserva el gesture context y desbloquea el audio session de iOS). Si hay audio en curso, hace `cancel()` + espera 80 ms antes de `doSpeak()` para que iOS re-adquiera el audio session.
+  - **Chrome Android:** `setInterval` cada 10 s llama `synthAPI.resume()` mientras `synthAPI.speaking === true` para prevenir el bug de pausa silenciosa.
+  - Parámetros: `rate: 0.95`, `pitch: 1.0`, `volume: 1.0`. Opciones: `{ onStart, onEnd, onError, resumeRef }`.
+
+### `useVoice.js` (`src/hooks/`)
+Hook React que conecta la Web Speech API con el estado de componente. Delega toda la lógica TTS a `speech.js`.
+
+**STT (speech-to-text):**
+- Se crea una instancia **nueva** de `SpeechRecognitionAPI` en cada llamada a `startListening()`. Reutilizar la instancia tras `onend` lanza `InvalidStateError` en Chrome Android y Safari.
+- `rec.lang = 'es-MX'`, `continuous: false`, `interimResults: false`.
+- Errores `no-speech` y `aborted` se silencian (esperados en uso normal).
+
+**TTS (text-to-speech):**
+- `speak(text)` → llama `speakMessage(text, { onStart, onEnd, onError, resumeRef })`.
+- `cancelSpeak()` → `clearInterval(resumeRef.current)` + `synthAPI.cancel()` + `setIsSpeaking(false)`.
+- Cleanup on unmount: limpia el interval + cancela síntesis.
+
+**Exports:** `isListening`, `isSpeaking`, `transcript`, `voiceError`, `sttSupported`, `ttsSupported`, `startListening`, `stopListening`, `clearTranscript`, `speak`, `cancelSpeak`.
+
+### `VoiceButton.jsx` (`src/components/Chat/`)
+Botón de micrófono con animaciones Framer Motion. Muestra mientras graba dos anillos de ripple que se expanden sobre el botón. Intercambia ícono mic ↔ mic-off según estado.
+
+- Props: `isListening`, `onToggle`
+- Accesibilidad: `aria-pressed`, `aria-label` dinámico
+- CSS: `.voice-btn`, `.voice-btn--listening` (fondo rojo + sombra roja)
+
+### `ChatWindow.jsx` — cambios de voz
+- **`handleToggleVoice`**: llama `speak('Voz activada')` síncronamente dentro del click handler (obligatorio en iOS Safari para desbloquear el audio session la primera vez).
+- **Auto-speak**: `useEffect` que observa `messages` → si el último mensaje es del bot, está marcado `isNew` y `voiceEnabled` es `true`, llama `speak(last.text)`.
+- **Cleanup**: listener `visibilitychange` → `cancelSpeak()` cuando la pestaña se oculta; `cancelSpeak()` on unmount.
+- **UI**: botón speaker en el header con clase `.voice-toggle--on` (verde, doble anillo pulsante) cuando la voz está activa. El status muta a "Reproduciendo voz…" con punto pulsante cuando `isSpeaking`.
+
+### `MessageInput.jsx` — cambios de voz
+- Acepta prop `voice` con safe-defaults (retrocompatible con código que no pase `voice`).
+- `useEffect` on `transcript` → llama `sendMessage(transcript)` automáticamente cuando STT termina.
+- Botón `VoiceButton` mostrado cuando `sttSupported`.
+- Input pasa a `readOnly` con placeholder "Escuchando…" mientras `isListening`.
+- Clase CSS `.message-input--listening` aplica sombra roja al input bar.
+
+### `ChatContext.jsx` — cambios de voz
+- Nuevo estado `voiceEnabled` (default `false`).
+- Nuevo callback `toggleVoice` (flips `voiceEnabled`).
+- Ambos expuestos en el valor del contexto.
 
 ---
 
@@ -957,6 +1023,80 @@ Cambios visuales:
 - `socketService.js` → función interna `generateUUID()` usando `crypto.getRandomValues()` (sin restricción de Secure Context)
 - `MessageInput.jsx` → eliminado `disabled` nativo (bloquea todos los eventos en iOS); usa `aria-disabled` + `onTouchStart` con `e.preventDefault()` para disparar antes del blur + `onClick` como fallback desktop; texto en ref (`textRef`) para evitar closures stale
 - `App.css` → `touch-action: manipulation` en `.send-btn` elimina el delay de 300ms en Android
+
+---
+
+### Sprint 18 — Datos de contacto del negocio e intent `comprar` *(3 abr 2026)*
+
+Nuevas columnas `email`, `phone`, `webpage_link` en la tabla `businesses` para que el chatbot informe cómo contactar o comprar en el negocio y el panel de administración las gestione.
+
+- `schema.sql` → tabla `businesses` con `email VARCHAR(255)`, `phone VARCHAR(50)`, `webpage_link VARCHAR(500)`
+- `backend/src/models/businessModel.js` → `getUbicacion` SELECT actualizado para incluir `webpage_link`; nuevo `getComprarInfo(businessId)` → `SELECT name, description, city, webpage_link`
+- `backend/src/mockai/intents.js` → nuevo intent `comprar` (standalone: true, ~22 keywords con pesos 1–3): "quiero comprar", "como compro", "tienda en linea", "quiero adquirir", "hacer pedido", etc.
+- `backend/src/services/businessInfoService.js` → `comprar` agregado al `QUERY_MAP`
+- `backend/src/services/intentResponseFormatter.js` → `FORMATTERS.comprar(row)` — mensaje con 🛒, muestra `webpage_link` si existe, ciudad y descripción del negocio
+- `admin-backend/src/models/businessModel.js` → `findById` y `update` incluyen `email`, `phone`, `webpage_link` (8 parámetros en UPDATE)
+- `admin-frontend/src/components/forms/BusinessForm.jsx` → tres nuevos campos: Email (`type="email"`), Teléfono (`type="tel"`), Página web (`type="url"`)
+- `admin-frontend/src/pages/BusinessInfo.jsx` → tres nuevas filas de detalle: Email, Teléfono, Página web
+
+---
+
+### Sprint 19 — Voz STT + TTS (Web Speech API) *(3 abr 2026)*
+
+Feature de voz completo usando únicamente APIs nativas del navegador. **Privacidad garantizada:** ningún audio sale del dispositivo.
+
+#### Archivos nuevos
+
+**`frontend/src/utils/speech.js`** — Utilidades TTS puras (independientes de React):
+- `prepareForSpeech(text)` — pipeline de limpieza: emojis, markdown, precios, balas/saltos de línea
+- `pickBestVoice()` — selección de voz española premium (Google/Microsoft/Siri) con cascade de locales
+- `speakMessage(text, opts)` — TTS con fixes iOS (idle-sync / busy-delay 80 ms) + Android Chrome (resume heartbeat cada 10 s)
+
+**`frontend/src/hooks/useVoice.js`** — Hook React que conecta Web Speech API con estado de componente:
+- STT: crea instancia nueva de `SpeechRecognitionAPI` en cada sesión (previene `InvalidStateError` en Android/Safari)
+- TTS: delega a `speakMessage()` de `speech.js`
+
+**`frontend/src/components/Chat/VoiceButton.jsx`** — Botón de micrófono animado:
+- Dos anillos ripple (Framer Motion) mientras graba
+- Swap de ícono mic ↔ mic-off
+- `aria-pressed` + `aria-label` dinámico
+
+#### Archivos modificados
+
+- `frontend/src/context/ChatContext.jsx` → `voiceEnabled` state + `toggleVoice` callback
+- `frontend/src/components/Chat/ChatWindow.jsx` → `handleToggleVoice` (desbloquea iOS síncronamente), auto-speak bot messages, cleanup on hide/unmount, botón speaker en header
+- `frontend/src/components/Chat/MessageInput.jsx` → acepta prop `voice`, auto-send transcript STT, `VoiceButton` visible cuando `sttSupported`
+- `frontend/src/App.css` → `.voice-btn`, `.voice-btn--listening`, `.voice-toggle`, `.voice-toggle--on`, `.message-input--listening`
+
+#### Bugs de plataforma resueltos
+
+| Bug | Plataforma | Causa | Fix |
+|---|---|---|---|
+| TTS silencioso tras activar | iOS Safari | `cancel()` siempre libera el audio session; siguiente `speak()` falla silenciosamente | Path idle: `doSpeak()` síncronamente. Path busy: `cancel()` + 80 ms + `doSpeak()` |
+| STT falla en el segundo toque | Chrome Android / Safari | Reutilizar la misma instancia `SpeechRecognition` después de `onend` → `InvalidStateError` | Crear instancia nueva en cada `startListening()` |
+| TTS pausado a los ~10-15 s | Chrome Android | Bug del navegador: síntesis se pausa silenciosamente | `setInterval` cada 10 s llama `synthAPI.resume()` mientras `speaking === true` |
+
+---
+
+### Sprint 20 — Fix pronunciación de precios + animación verde de voz *(3 abr 2026)*
+
+#### Bug: precio pronunciado incorrectamente
+
+**Síntoma:** `$120.00` se pronunciaba como "1 peso 20, 00".
+
+**Causa:** La regex en `prepareForSpeech` era `/\$\s?(\d)/` — capturaba solo **un** dígito, dejando el resto del número sin procesar.
+
+**Fix en `speech.js`** — cascada de 4 reglas en orden de especificidad:
+1. `\$\s?(\d+)\.00\b` → `"N pesos"` (ej: `$120.00` → `"120 pesos"`)
+2. `\$\s?(\d+)\.(\d{2})\b` → `"N pesos con M centavos"` (ej: `$120.50` → `"120 pesos con 50 centavos"`)
+3. `\$\s?(\d+)` → `"N pesos"` (ej: `$120` → `"120 pesos"`)
+4. `\$` suelto → `" pesos "` (fallback)
+
+#### Visual: botón de voz verde pulsante
+
+- `.voice-toggle--on` cambió de color `--accent` (morado) a `#10b981` (verde emerald)
+- `@keyframes voicePulse` — doble anillo concéntrico que se expande y desvanece en bucle de 2 s
+- `.chat-header__status--speaking` — color `--accent` + pulso más rápido durante reproducción
 
 ---
 

@@ -48,10 +48,13 @@ const BusinessInfo = () => {
         <button className="btn btn--primary" onClick={() => setEditing(true)}>Editar</button>
       </div>
       <div className="info-card">
-        <Row label="Nombre"      value={business.name}        />
-        <Row label="Categoría"   value={business.category}    />
-        <Row label="Ciudad"      value={business.city}        />
-        <Row label="Descripción" value={business.description} />
+        <Row label="Nombre"      value={business.name}         />
+        <Row label="Categoría"   value={business.category}     />
+        <Row label="Ciudad"      value={business.city}         />
+        <Row label="Descripción" value={business.description}  />
+        <Row label="Email"       value={business.email}        />
+        <Row label="Teléfono"    value={business.phone}        />
+        <Row label="Página web"  value={business.webpage_link} />
       </div>
     </div>
   );

@@ -13,6 +13,18 @@ const db = require('../config/database');
 
 const BusinessModel = {
   /**
+   * Returns just the business name — used for the welcome message on join.
+   * @param {number} businessId
+   */
+  async getName(businessId) {
+    const result = await db.query(
+      'SELECT name FROM businesses WHERE id = $1',
+      [businessId]
+    );
+    return result.rows[0]?.name || null;
+  },
+
+  /**
    * Intent: horarios
    * Returns all weekly schedule rows for the business.
    * @param {number} businessId
@@ -215,6 +227,25 @@ const BusinessModel = {
          name,
          description,
          city,
+         webpage_link
+       FROM businesses
+       WHERE id = $1`,
+      [businessId]
+    );
+    return result.rows[0] || null;
+  },
+
+  /**
+   * Intent: contacto
+   * Returns phone, email and webpage_link for the business.
+   * @param {number} businessId
+   */
+  async getContactoInfo(businessId) {
+    const result = await db.query(
+      `SELECT
+         name,
+         phone,
+         email,
          webpage_link
        FROM businesses
        WHERE id = $1`,

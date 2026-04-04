@@ -19,6 +19,7 @@ const { CLIENT_URL }    = require('../config/env');
 const { getContext, updateContext, SESSION_TTL_SECONDS } = require('../services/sessionContextService');
 const { getCategories } = require('../services/businessInfoService');
 const { formatList }    = require('../services/intentResponseFormatter');
+const BusinessModel     = require('../models/businessModel');
 
 /** Milliseconds of inactivity before sending the re-engagement message.
  *  Matches SESSION_TTL_SECONDS so the message fires exactly when Redis context expires. */
@@ -89,12 +90,37 @@ const initSocket = (httpServer) => {
     console.log(`[Socket] Connected:    ${socket.id}`);
 
     // ── Join a room ──────────────────────────────────────────────────────────
-    socket.on('join_room', (roomId) => {
+    socket.on('join_room', async ({ roomId, businessId } = {}) => {
+      if (!roomId) return;
       socket.join(roomId);
       console.log(`[Socket] ${socket.id} joined room: ${roomId}`);
 
       const history = MessageService.getRoomMessages(roomId);
       socket.emit('message_history', history);
+
+      // Send welcome message only for brand-new rooms (no history yet)
+      if (history.length === 0 && businessId) {
+        try {
+          const name = await BusinessModel.getName(businessId);
+          const bizLabel = name || 'nuestro negocio';
+          const welcomeText =
+            `¡Hola! Bienvenido a ${bizLabel} 👋\n\n` +
+            `¿En qué te puedo ayudar? Puedes preguntarme por:\n` +
+            `• Disponibilidad de productos y precios\n` +
+            `• Servicios que ofrecemos\n` +
+            `• Horarios de atención\n` +
+            `• Cómo contactarnos o comprar\n\n` +
+            `¡Es un placer atenderte! 😊`;
+          const welcomeMsg = MessageService.saveMessage({
+            roomId,
+            sender: 'Bot',
+            text: welcomeText,
+          });
+          socket.emit('receive_message', welcomeMsg);
+        } catch (err) {
+          console.warn('[Welcome] Error al enviar mensaje de bienvenida:', err.message);
+        }
+      }
     });
 
     // ── Send a message ───────────────────────────────────────────────────────

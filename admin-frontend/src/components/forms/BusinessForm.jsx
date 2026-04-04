@@ -7,17 +7,20 @@ const CATEGORIES = ['restaurant', 'hardware', 'stationery', 'pharmacy', 'clothin
 
 const BusinessForm = ({ business, onSaved, onCancel }) => {
   const { addToast } = useToast();
-  const [form,   setForm]   = useState({ name: '', category: '', description: '', city: '' });
+  const [form,   setForm]   = useState({ name: '', category: '', description: '', city: '', email: '', phone: '', webpage_link: '' });
   const [error,  setError]  = useState('');
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (business) {
       setForm({
-        name:        business.name,
-        category:    business.category,
-        description: business.description ?? '',
-        city:        business.city ?? '',
+        name:         business.name,
+        category:     business.category,
+        description:  business.description ?? '',
+        city:         business.city ?? '',
+        email:        business.email ?? '',
+        phone:        business.phone ?? '',
+        webpage_link: business.webpage_link ?? '',
       });
     }
   }, [business]);
@@ -65,6 +68,21 @@ const BusinessForm = ({ business, onSaved, onCancel }) => {
       <div className="form-group">
         <label className="form-label">Descripción</label>
         <textarea className="form-input form-textarea" rows={4} value={form.description} onChange={(e) => set('description', e.target.value)} placeholder="Breve descripción del negocio…" />
+      </div>
+
+      <div className="form-group">
+        <label className="form-label">Email</label>
+        <input className="form-input" type="email" value={form.email} onChange={(e) => set('email', e.target.value)} placeholder="Ej. contacto@minegocio.mx" />
+      </div>
+
+      <div className="form-group">
+        <label className="form-label">Teléfono</label>
+        <input className="form-input" type="tel" value={form.phone} onChange={(e) => set('phone', e.target.value)} placeholder="Ej. +52 55 1234 5678" />
+      </div>
+
+      <div className="form-group">
+        <label className="form-label">Página web</label>
+        <input className="form-input" type="url" value={form.webpage_link} onChange={(e) => set('webpage_link', e.target.value)} placeholder="Ej. https://www.minegocio.mx" />
       </div>
 
       <div className="form-actions">

@@ -38,7 +38,7 @@ const useSocket = () => {
     const socket = socketService.connect();
 
     if (joinedRoom.current !== roomId) {
-      socket.emit('join_room', roomId);
+      socket.emit('join_room', { roomId, businessId });
       joinedRoom.current = roomId;
     }
 
