@@ -54,6 +54,8 @@ const intents = {
       { phrase: 'que dia cierras', weight: 3 },
       { phrase: 'que dias vendes', weight: 3 },
       // Frases parciales (weight 2)
+      { phrase: 'está abierto', weight: 2 },
+      { phrase: 'está abierto hoy', weight: 2 },
       { phrase: 'cuando abres', weight: 2 },
       { phrase: 'cuando cierras', weight: 2 },
       { phrase: 'cuando abren', weight: 2 },

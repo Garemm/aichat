@@ -64,6 +64,8 @@ const ENTITY_BLOCKLIST = new Set([
   'cuanto', 'cuanta', 'cuantos', 'cuantas',
   'cuando', 'donde', 'como', 'cual', 'cuales', 'quien',
   'que', 'precio', 'costo', 'tarifa',
+  // Command verbs — imperative forms that trigger actions but are never entities
+  'muestrame', 'dame', 'pasame', 'mandame', 'enviame',
 ]);
 
 function isBlocklisted(entity) {

@@ -237,7 +237,7 @@ describe('formatProductResponse()', () => {
       { id: 3, name: 'Pizza Hawaiana', price: '120.00', is_available: false },
     ];
     const result = formatProductResponse('pizza', products);
-    expect(result).toContain('3 resultados');
+    expect(result).toContain('3 tipos');
     expect(result).toContain('Pizza Margarita');
     expect(result).toContain('Pizza Pepperoni');
     expect(result).toContain('Pizza Hawaiana');
