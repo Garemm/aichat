@@ -195,7 +195,27 @@ const BusinessModel = {
       `SELECT
          name,
          description,
-         city
+         city,
+         webpage_link
+       FROM businesses
+       WHERE id = $1`,
+      [businessId]
+    );
+    return result.rows[0] || null;
+  },
+
+  /**
+   * Intent: comprar
+   * Returns business contact/location info for purchase guidance.
+   * @param {number} businessId
+   */
+  async getComprarInfo(businessId) {
+    const result = await db.query(
+      `SELECT
+         name,
+         description,
+         city,
+         webpage_link
        FROM businesses
        WHERE id = $1`,
       [businessId]

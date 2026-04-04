@@ -23,6 +23,7 @@ const QUERY_MAP = {
   promociones: (businessId) => BusinessModel.getPromociones(businessId),
   ubicacion:   (businessId) => BusinessModel.getUbicacion(businessId),
   servicios:   (businessId) => BusinessModel.getServices(businessId),
+  comprar:     (businessId) => BusinessModel.getComprarInfo(businessId),
 };
 
 /**

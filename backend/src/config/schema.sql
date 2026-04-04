@@ -32,13 +32,16 @@ DROP TABLE IF EXISTS businesses          CASCADE;
 -- businesses
 -- ─────────────────────────────────────────────────────────────────────────────
 CREATE TABLE businesses (
-    id          SERIAL        PRIMARY KEY,
-    name        VARCHAR(255)  NOT NULL,
-    category    VARCHAR(50)   NOT NULL
-                    CHECK (category IN ('restaurant', 'hardware', 'stationery')),
-    description TEXT,
-    city        VARCHAR(100),
-    created_at  TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+    id           SERIAL        PRIMARY KEY,
+    name         VARCHAR(255)  NOT NULL,
+    category     VARCHAR(50)   NOT NULL
+                     CHECK (category IN ('restaurant', 'hardware', 'stationery')),
+    description  TEXT,
+    city         VARCHAR(100),
+    email        VARCHAR(255),
+    phone        VARCHAR(50),
+    webpage_link VARCHAR(500),
+    created_at   TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
 
 
@@ -197,10 +200,10 @@ CREATE INDEX idx_admins_business_id         ON admins              (business_id)
 -- ─────────────────────────────────────────────────────────────────────────────
 -- BUSINESSES  (ids 1=restaurant, 2=hardware, 3=stationery)
 -- ─────────────────────────────────────────────────────────────────────────────
-INSERT INTO businesses (id, name, category, description, city) VALUES
-(1, 'Restaurante Don Pepe',      'restaurant', 'Comida casera y antojitos mexicanos desde 1995.', 'Ciudad de México'),
-(2, 'Ferretería El Tornillo',    'hardware',   'Todo en herramientas, materiales y construcción.', 'Guadalajara'),
-(3, 'Papelería La Pluma',        'stationery', 'Artículos escolares, oficina y manualidades.',     'Monterrey');
+INSERT INTO businesses (id, name, category, description, city, email, phone, webpage_link) VALUES
+(1, 'Restaurante Don Pepe',   'restaurant', 'Comida casera y antojitos mexicanos desde 1995.', 'Ciudad de México', 'contacto@donpepe.mx',     '+52 55 1234 5678', 'https://www.donpepe.mx'),
+(2, 'Ferretería El Tornillo', 'hardware',   'Todo en herramientas, materiales y construcción.', 'Guadalajara',      'ventas@eltornillo.mx',    '+52 33 8765 4321', 'https://www.eltornillo.mx'),
+(3, 'Papelería La Pluma',     'stationery', 'Artículos escolares, oficina y manualidades.',     'Monterrey',        'info@papeleriapluma.mx', '+52 81 5555 9090', 'https://www.papeleriapluma.mx');
 
 SELECT setval('businesses_id_seq', 3);
 

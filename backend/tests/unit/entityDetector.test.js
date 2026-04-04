@@ -226,7 +226,7 @@ describe('formatProductResponse()', () => {
     }]);
     expect(result).toContain('Hamburguesa Doble');
     expect(result).toContain('$150.00');
-    expect(result).toContain('Disponible');
+    expect(result).toContain('✅');
     expect(result).toContain('Stock: 30');
   });
 
@@ -250,7 +250,8 @@ describe('formatProductResponse()', () => {
       id: 1, name: 'Pozole', description: null, price: '120.00',
       is_available: false, stock_quantity: 0,
     }]);
-    expect(result).toContain('No disponible');
+    expect(result).toContain('❌');
+    expect(result).toContain('no está disponible');
   });
 });
 

@@ -119,10 +119,10 @@ const PRODUCT_QUERY_PATTERNS = [
   /esta(?:s|n)?\s+disponible[s]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
   /hay\s+stock\s+de\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
   /tiene(?:s|n)?\s+disponibilidad\s+(?:de\s+)?(?:el\s+|la\s+|los\s+|las\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
-  // "que tipo(s) de X tienen/tienes/tiene/hay" — entity inside "que tipo de … verb"
+  // "que tipo(s) de X tienen/tienes/tiene/hay/vende/venden" — entity inside "que tipo de … verb"
   // MUST appear before the generic "que X tienen" pattern below.
-  /^que\s+tipos?\s+de\s+(?<entity>[\wñ]+(?:\s+[\wñ]+){0,3})\s+(?:tiene[sn]?|tienen|hay)\s*\??$/,
-  /que\s+tipos?\s+de\s+(?<entity>[\wñ]+(?:\s+[\wñ]+){0,3})\s+(?:tiene[sn]?|tienen|hay)/,
+  /^que\s+tipos?\s+de\s+(?<entity>[\wñ]+(?:\s+[\wñ]+){0,3})\s+(?:tiene[sn]?|tienen|hay|vende[sn]?|venden|ofrece[n]?|maneja[n]?)\s*\??$/,
+  /que\s+tipos?\s+de\s+(?<entity>[\wñ]+(?:\s+[\wñ]+){0,3})\s+(?:tiene[sn]?|tienen|hay|vende[sn]?|venden|ofrece[n]?|maneja[n]?)/,
   // "que [entity] tienen/tienes/hay?" — entity BETWEEN "que" and trailing verb.
   // Must run BEFORE the generic tiene[sn]? pattern which would otherwise grab
   // whatever follows "tienen" (e.g. "disponibles") as the entity.
@@ -138,8 +138,8 @@ const PRODUCT_QUERY_PATTERNS = [
   /vende[ns]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
   /ofrece[ns]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
   /necesito\s+(?:un\s+|una\s+|el\s+|la\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
-  // Reversed-order: entity before verb — "X tienes?" / "X hay?"
-  /(?<entity>[\wñ]+(?:\s+[\wñ]+){0,3})\s+(?:tienes?|tienen|hay)\s*\?$/,
+  // Reversed-order: entity before verb — "X tienes?" / "X hay?" / "X venden?"
+  /(?<entity>[\wñ]+(?:\s+[\wñ]+){0,3})\s+(?:tienes?|tienen|hay|vende[sn]?|venden)\s*\?$/,
   // Description-intent phrases: "que contiene X", "que incluye X", "que trae X"
   // singular and plural forms, optional article el/la/los/las before entity
   /(?:que\s+)?contiene[n]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+|este\s+|esta\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
@@ -168,6 +168,12 @@ function cleanEntityCandidate(entity) {
     .replace(/\s+en\s+stock\s*$/, '')
     .replace(/\s+que\s+(?:tengas?|tienen|hay)\s*$/, '')
     .replace(/\s+para\s+(?:comprar|vender)\s*$/, '')
+    // Strip trailing conjugated sell/offer verbs that are never part of the
+    // product name but get attached by the NLP fallback (e.g. "pizza vende").
+    .replace(/\s+vende[sn]?\s*$/, '')
+    .replace(/\s+venden\s*$/, '')
+    .replace(/\s+ofrece[n]?\s*$/, '')
+    .replace(/\s+manejan?\s*$/, '')
     .trim();
 }
 
@@ -238,12 +244,19 @@ async function queryProducts(entity, businessId) {
   const conditions = [];
   const params = [businessId];
 
-  // Accent-strip macro reused across all text columns
-  const TR = "translate(%s, '\u00e1\u00e9\u00ed\u00f3\u00fa\u00fc\u00f1', 'aeiouu n')";
+  // Accent-strip macro reused across all text columns.
+  // Maps: á→a é→e í→i ó→o ú→u ü→u ñ→n  (7 source chars → 7 replacement chars)
+  // NOTE: 'ñ' is mapped to 'n' (not space). The replacement string must have
+  // the same length as the source so PostgreSQL translate maps each char 1-to-1.
+  const TR = "translate(%s, '\u00e1\u00e9\u00ed\u00f3\u00fa\u00fc\u00f1', 'aeiooun')";
   const trCol = (col) => TR.replace('%s', `LOWER(${col})`);
 
+  // Apply the SAME ñ→n substitution to every search param so both sides match.
+  // (Other accents are already stripped by normalize() before reaching here.)
+  const sqlParam = (s) => s.replace(/ñ/g, 'n');
+
   for (const v of variants) {
-    const like = `%${v}%`;
+    const like = `%${sqlParam(v)}%`;
     conditions.push(
       `(${trCol('p.name')} ILIKE $${idx}` +
       ` OR ${trCol('p.description')} ILIKE $${idx + 1}` +
@@ -262,7 +275,7 @@ async function queryProducts(entity, businessId) {
     if (words.length < 2) continue; // single-word already covered above
     const wordClauses = [];
     for (const w of words) {
-      const like = `%${w}%`;
+      const like = `%${sqlParam(w)}%`;
       wordClauses.push(
         `(${trCol('p.name')} ILIKE $${idx}` +
         ` OR ${trCol('p.description')} ILIKE $${idx + 1}` +
@@ -279,9 +292,9 @@ async function queryProducts(entity, businessId) {
   const nameMatchConditions = variants.map((_, i) =>
     `${trCol('p.name')} ILIKE $${idx + i}`
   );
-  params.push(...variants.map((v) => `%${v}%`));
+  params.push(...variants.map((v) => `%${sqlParam(v)}%`));
   const exactMatchParam = idx + variants.length;
-  params.push(entity); // exact match
+  params.push(sqlParam(entity)); // exact match
 
   const result = await db.query(
     `SELECT

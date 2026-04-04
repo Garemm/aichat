@@ -85,6 +85,24 @@ const FORMATTERS = {
     return `📍 ¡Aquí nos encuentras!\n• Negocio: ${row.name}\n• Ciudad: ${row.city}\n• ${row.description}`;
   },
 
+  comprar(row) {
+    if (!row) return '¡Ups! Por el momento no tenemos información disponible para guiarte en tu compra. Inténtalo de nuevo más tarde 😊';
+    const lines = [`🛒 ¡Me alegra que quieras realizar una compra con nosotros!`];
+    lines.push('');
+    if (row.webpage_link) {
+      lines.push(`🌐 Tienda en línea: ${row.webpage_link}`);
+    }
+    if (row.city) {
+      lines.push(`📍 También puedes visitarnos en: ${row.city}`);
+    }
+    if (row.description) {
+      lines.push(`💬 ${row.description}`);
+    }
+    lines.push('');
+    lines.push('¡Con gusto te atendemos! Si tienes dudas sobre algún producto o servicio, solo pregúntame 😊');
+    return lines.join('\n');
+  },
+
   servicios(rows) {
     if (!rows || rows.length === 0) return 'Por el momento no tenemos servicios registrados. ¿Puedo ayudarte con algo más?';
     const items = rows.map((s) => {
