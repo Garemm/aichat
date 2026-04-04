@@ -28,6 +28,12 @@ export const updateBusiness = (data) =>
   fetch(`${BASE}/business`, { method: 'PUT', headers: headers(), body: JSON.stringify(data) }).then(handleRes);
 
 export const getCategories = () => fetch(`${BASE}/categories`, { headers: headers() }).then(handleRes);
+export const createCategory = (data) =>
+  fetch(`${BASE}/categories`, { method: 'POST', headers: headers(), body: JSON.stringify(data) }).then(handleRes);
+export const updateCategory = (id, data) =>
+  fetch(`${BASE}/categories/${id}`, { method: 'PUT', headers: headers(), body: JSON.stringify(data) }).then(handleRes);
+export const deleteCategory = (id) =>
+  fetch(`${BASE}/categories/${id}`, { method: 'DELETE', headers: headers() }).then(handleRes);
 
 // ── Products ──────────────────────────────────────────────────────────────────
 export const getProducts   = ()     => fetch(`${BASE}/products`,       { headers: headers() }).then(handleRes);
@@ -68,3 +74,22 @@ export const saveHour = (data) =>
 
 export const saveAllHours = (days) =>
   fetch(`${BASE}/hours/bulk`, { method: 'POST', headers: headers(), body: JSON.stringify({ days }) }).then(handleRes);
+
+// ── Bulk Import ───────────────────────────────────────────────────────────────
+export const importPreview = (file) => {
+  const form = new FormData();
+  form.append('file', file);
+  return fetch(`${BASE}/products/import/preview`, {
+    method: 'POST',
+    headers: { 'x-business-id': getBusinessId() }, // no Content-Type — let browser set multipart boundary
+    body: form,
+  }).then(handleRes);
+};
+
+// createMissingCategories: pass true after the user confirms category creation
+export const importConfirm = (rows, createMissingCategories = false) =>
+  fetch(`${BASE}/products/import/confirm`, {
+    method: 'POST',
+    headers: headers(),
+    body: JSON.stringify({ rows, createMissingCategories }),
+  }).then(handleRes);

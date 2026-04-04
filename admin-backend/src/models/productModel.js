@@ -7,7 +7,7 @@ const ProductModel = {
   async findAllByBusiness(businessId) {
     const { rows } = await db.query(
       `SELECT p.id, p.name, p.description, p.price, p.category_id,
-              p.is_available, p.created_at,
+              p.is_available, p.created_at, p.item_code_empresa,
               c.name AS category_name,
               COALESCE(pi.stock_quantity, 0) AS stock_quantity
        FROM products p
@@ -24,7 +24,7 @@ const ProductModel = {
   async findById(id, businessId) {
     const { rows } = await db.query(
       `SELECT p.id, p.name, p.description, p.price, p.category_id,
-              p.is_available, p.created_at,
+              p.is_available, p.created_at, p.item_code_empresa,
               COALESCE(pi.stock_quantity, 0) AS stock_quantity
        FROM products p
        LEFT JOIN product_inventory pi ON pi.product_id = p.id
@@ -41,16 +41,16 @@ const ProductModel = {
   },
 
   // ── Create product + inventory + attributes (one transaction) ─────────────
-  async create(businessId, { name, description, price, category_id, is_available, stock_quantity, attributes }) {
+  async create(businessId, { name, description, price, category_id, is_available, stock_quantity, attributes, item_code_empresa }) {
     const client = await db.connect();
     try {
       await client.query('BEGIN');
 
       const { rows: [product] } = await client.query(
-        `INSERT INTO products (business_id, name, description, price, category_id, is_available)
-         VALUES ($1,$2,$3,$4,$5,$6)
-         RETURNING id, name, description, price, category_id, is_available, created_at`,
-        [businessId, name, description || null, price, category_id || null, is_available ?? true]
+        `INSERT INTO products (business_id, name, description, price, category_id, is_available, item_code_empresa)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)
+         RETURNING id, name, description, price, category_id, is_available, created_at, item_code_empresa`,
+        [businessId, name, description || null, price, category_id || null, is_available ?? true, item_code_empresa || null]
       );
 
       await client.query(
@@ -79,17 +79,17 @@ const ProductModel = {
   },
 
   // ── Update product + inventory + replace attributes ────────────────────────
-  async update(id, businessId, { name, description, price, category_id, is_available, stock_quantity, attributes }) {
+  async update(id, businessId, { name, description, price, category_id, is_available, stock_quantity, attributes, item_code_empresa }) {
     const client = await db.connect();
     try {
       await client.query('BEGIN');
 
       const { rows: [product] } = await client.query(
         `UPDATE products
-         SET name=$1, description=$2, price=$3, category_id=$4, is_available=$5
-         WHERE id=$6 AND business_id=$7
-         RETURNING id, name, description, price, category_id, is_available`,
-        [name, description || null, price, category_id || null, is_available ?? true, id, businessId]
+         SET name=$1, description=$2, price=$3, category_id=$4, is_available=$5, item_code_empresa=$6
+         WHERE id=$7 AND business_id=$8
+         RETURNING id, name, description, price, category_id, is_available, item_code_empresa`,
+        [name, description || null, price, category_id || null, is_available ?? true, item_code_empresa || null, id, businessId]
       );
       if (!product) { await client.query('ROLLBACK'); return null; }
 
@@ -119,6 +119,85 @@ const ProductModel = {
       throw err;
     } finally {
       client.release();
+    }
+  },
+
+  // ── Upsert by item_code_empresa (used in bulk import) ────────────────────
+  // Returns { product, action: 'inserted' | 'updated' }
+  // Pass an existing `txClient` from the caller to run within its transaction.
+  async upsertByItemCode(businessId, row, txClient) {
+    const {
+      item_code_empresa, name, description, price,
+      category_id, is_available, stock_quantity, attributes,
+    } = row;
+
+    // Use provided transaction client or open a standalone one
+    const ownTx = !txClient;
+    const client = txClient ?? await db.connect();
+
+    try {
+      if (ownTx) await client.query('BEGIN');
+
+      // Check if product exists by item_code_empresa in this business
+      const { rows: existing } = await client.query(
+        `SELECT id FROM products WHERE business_id = $1 AND item_code_empresa = $2`,
+        [businessId, item_code_empresa]
+      );
+
+      let product;
+      let action;
+
+      if (existing.length > 0) {
+        // UPDATE
+        const existingId = existing[0].id;
+        const { rows: [updated] } = await client.query(
+          `UPDATE products
+           SET name=$1, description=$2, price=$3, category_id=$4, is_available=$5
+           WHERE id=$6 AND business_id=$7
+           RETURNING id, name, price, item_code_empresa`,
+          [name, description || null, price, category_id || null, is_available ?? true, existingId, businessId]
+        );
+        product = updated;
+        action = 'updated';
+      } else {
+        // INSERT
+        const { rows: [inserted] } = await client.query(
+          `INSERT INTO products (business_id, name, description, price, category_id, is_available, item_code_empresa)
+           VALUES ($1,$2,$3,$4,$5,$6,$7)
+           RETURNING id, name, price, item_code_empresa`,
+          [businessId, name, description || null, price, category_id || null, is_available ?? true, item_code_empresa]
+        );
+        product = inserted;
+        action = 'inserted';
+      }
+
+      // Upsert inventory
+      await client.query(
+        `INSERT INTO product_inventory (product_id, stock_quantity)
+         VALUES ($1,$2)
+         ON CONFLICT (product_id) DO UPDATE SET stock_quantity=$2, updated_at=NOW()`,
+        [product.id, stock_quantity ?? 0]
+      );
+
+      // Replace attributes if provided
+      if (Array.isArray(attributes) && attributes.length > 0) {
+        await client.query(`DELETE FROM product_attributes WHERE product_id = $1`, [product.id]);
+        for (const { key, value } of attributes) {
+          if (!key || value == null) continue;
+          await client.query(
+            `INSERT INTO product_attributes (product_id, key, value) VALUES ($1,$2,$3)`,
+            [product.id, key, String(value)]
+          );
+        }
+      }
+
+      if (ownTx) await client.query('COMMIT');
+      return { product, action };
+    } catch (err) {
+      if (ownTx) await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      if (ownTx) client.release();
     }
   },
 

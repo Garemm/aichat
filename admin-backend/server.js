@@ -3,7 +3,7 @@
 require('dotenv').config();
 const app = require('./src/app');
 
-const PORT = process.env.ADMIN_PORT || 4000;
+const PORT = process.env.PORT || 4000;
 
 app.listen(PORT, () => {
   console.log(`🛠  Admin API ready on http://localhost:${PORT}  [${process.env.NODE_ENV || 'development'}]`);

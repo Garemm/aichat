@@ -225,10 +225,63 @@ function extractEntityCandidate(normalizedText) {
  * @returns {Promise<Array>}
  */
 async function queryProducts(entity, businessId) {
-  // Build variants: "cuadernos" → search "cuadernos" OR "cuaderno"
-  const variants = wordVariants(entity);
-  const conditions = variants.map((_, i) => `translate(LOWER(p.name), '\u00e1\u00e9\u00ed\u00f3\u00fa\u00fc', 'aeiouu') ILIKE $${i + 2}`);
-  const params = [businessId, ...variants.map((v) => `%${v}%`)];
+  // Build variants: "cuadernos" → "cuaderno" (single-word singularization).
+  // Also singularize each word in multi-word phrases so "tacos de pastor"
+  // also matches a DB record named "taco de pastor".
+  const singularPhrase = entity.split(' ').map((w) => toSingular(w)).join(' ');
+  const variants = [...new Set([...wordVariants(entity), singularPhrase])];
+
+  // Each variant searches: name OR description OR product_attributes (key/value).
+  // Name matches are ranked first via ORDER BY so the most relevant result
+  // appears at the top when multiple products are returned.
+  let idx = 2;
+  const conditions = [];
+  const params = [businessId];
+
+  // Accent-strip macro reused across all text columns
+  const TR = "translate(%s, '\u00e1\u00e9\u00ed\u00f3\u00fa\u00fc\u00f1', 'aeiouu n')";
+  const trCol = (col) => TR.replace('%s', `LOWER(${col})`);
+
+  for (const v of variants) {
+    const like = `%${v}%`;
+    conditions.push(
+      `(${trCol('p.name')} ILIKE $${idx}` +
+      ` OR ${trCol('p.description')} ILIKE $${idx + 1}` +
+      ` OR EXISTS (SELECT 1 FROM product_attributes pa WHERE pa.product_id = p.id` +
+      ` AND (${trCol('pa.value')} ILIKE $${idx + 2} OR ${trCol('pa.key')} ILIKE $${idx + 3})))`
+    );
+    params.push(like, like, like, like);
+    idx += 4;
+  }
+
+  // Multi-word fallback: "cuaderno sin lineas" won't match "cuaderno de dibujo sin lineas"
+  // as a substring, so we also require each word to appear ANYWHERE in the text fields.
+  // This is added as an extra OR condition (AND across words, OR across fields per word).
+  for (const v of variants) {
+    const words = v.split(' ').filter((w) => w.length >= 2);
+    if (words.length < 2) continue; // single-word already covered above
+    const wordClauses = [];
+    for (const w of words) {
+      const like = `%${w}%`;
+      wordClauses.push(
+        `(${trCol('p.name')} ILIKE $${idx}` +
+        ` OR ${trCol('p.description')} ILIKE $${idx + 1}` +
+        ` OR EXISTS (SELECT 1 FROM product_attributes pa2 WHERE pa2.product_id = p.id` +
+        ` AND (${trCol('pa2.value')} ILIKE $${idx + 2} OR ${trCol('pa2.key')} ILIKE $${idx + 3})))`
+      );
+      params.push(like, like, like, like);
+      idx += 4;
+    }
+    conditions.push(`(${wordClauses.join(' AND ')})`);
+  }
+
+  // Exact name match → rank 0; partial name match → rank 1; desc/attr match → rank 2
+  const nameMatchConditions = variants.map((_, i) =>
+    `${trCol('p.name')} ILIKE $${idx + i}`
+  );
+  params.push(...variants.map((v) => `%${v}%`));
+  const exactMatchParam = idx + variants.length;
+  params.push(entity); // exact match
 
   const result = await db.query(
     `SELECT
@@ -240,10 +293,13 @@ async function queryProducts(entity, businessId) {
      WHERE p.business_id = $1
        AND (${conditions.join(' OR ')})
      ORDER BY
-       CASE WHEN translate(LOWER(p.name), '\u00e1\u00e9\u00ed\u00f3\u00fa\u00fc', 'aeiouu') = $${params.length + 1} THEN 0 ELSE 1 END,
+       CASE WHEN ${trCol('p.name')} = $${exactMatchParam} THEN 0
+            WHEN (${nameMatchConditions.join(' OR ')}) THEN 1
+            ELSE 2
+       END,
        p.name ASC
-     LIMIT 5`,
-    [...params, entity]
+     LIMIT 10`,
+    params
   );
   return result.rows;
 }
@@ -415,14 +471,20 @@ function formatProductResponse(entity, products) {
 
   if (products.length === 1) {
     const p = products[0];
-    const status = p.is_available ? '✅ Disponible' : '❌ No disponible';
+    const available = p.is_available !== false;
     const stock  = p.stock_quantity != null ? `\n  📦 Stock: ${p.stock_quantity} uds.` : '';
     const cat    = p.category ? `\n  🏷️ Categoría: ${p.category}` : '';
     const desc   = p.description ? `\n  📝 ${p.description}` : '';
+    if (available) {
+      return (
+        `¡Sí, tenemos *${p.name}*! ✅\n` +
+        `  💲 Precio: $${Number(p.price).toFixed(2)}` +
+        stock + cat + desc
+      );
+    }
     return (
-      `🔍 *${p.name}*\n` +
-      `  💲 Precio: $${Number(p.price).toFixed(2)}\n` +
-      `  ${status}` +
+      `*${p.name}* ❌ no está disponible actualmente.\n` +
+      `  💲 Precio referencial: $${Number(p.price).toFixed(2)}` +
       stock + cat + desc
     );
   }
@@ -430,10 +492,11 @@ function formatProductResponse(entity, products) {
   const lines = products.map((p) => {
     const status = p.is_available ? '✅' : '❌';
     const stock  = p.stock_quantity != null ? ` · stock: ${p.stock_quantity}` : '';
-    const cat    = p.category ? ` [${p.category}]` : '';
-    return `  • ${status} *${p.name}*${cat}\n      💲 $${Number(p.price).toFixed(2)}${stock}`;
+    const cat    = p.category ? ` · ${p.category}` : '';
+    const desc   = p.description ? `\n      📝 ${p.description}` : '';
+    return `  • ${status} *${p.name}* — $${Number(p.price).toFixed(2)}${stock}${cat}${desc}`;
   });
-  return `🔍 Encontré *${products.length} resultados* para "${entity}":\n\n${lines.join('\n\n')}`;
+  return `🔍 Encontré *${products.length} resultados* para "*${entity}*":\n\n${lines.join('\n\n')}`;
 }
 
 /**

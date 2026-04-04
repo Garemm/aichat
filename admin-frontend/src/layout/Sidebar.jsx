@@ -1,10 +1,11 @@
-import { NavLink, useNavigate } from 'react-router-dom';
-import { useAuth } from '../context/AuthContext';
+import { NavLink } from 'react-router-dom';
 import Icon from '../components/ui/Icon';
 
 const links = [
   { to: '/dashboard',   label: 'Dashboard',   icon: 'dashboard'   },
   { to: '/products',    label: 'Productos',    icon: 'products'    },
+  { to: '/categories',  label: 'Categorías',   icon: 'categories'  },
+  { to: '/import',      label: 'Importar',     icon: 'upload'      },
   { to: '/services',    label: 'Servicios',    icon: 'services'    },
   { to: '/promotions',  label: 'Promociones',  icon: 'promotions'  },
   { to: '/hours',       label: 'Horarios',     icon: 'hours'       },
@@ -12,17 +13,8 @@ const links = [
 ];
 
 const Sidebar = ({ onClose }) => {
-  const { signOut } = useAuth();
-  const navigate    = useNavigate();
-
-  const handleLogout = () => {
-    signOut();
-    navigate('/login', { replace: true });
-  };
-
   const handleNav = () => {
-    // Close sidebar on mobile after navigating
-    if (window.innerWidth < 768) onClose?.();
+    if (window.innerWidth < 900) onClose?.();
   };
 
   return (
@@ -47,10 +39,6 @@ const Sidebar = ({ onClose }) => {
           </NavLink>
         ))}
       </nav>
-      <button className="sidebar__logout" onClick={handleLogout}>
-        <Icon name="logout" size={18} className="sidebar__link-icon" />
-        <span>Cerrar sesión</span>
-      </button>
     </aside>
   );
 };

@@ -6,7 +6,7 @@ const errorHandler = require('./middlewares/errorHandler');
 
 const app = express();
 
-const ALLOWED_ORIGINS = (process.env.ADMIN_CLIENT_URL || 'http://localhost:5174')
+const ALLOWED_ORIGINS = (process.env.CLIENT_URL || 'http://localhost:5174')
   .split(',')
   .map((u) => u.trim());
 

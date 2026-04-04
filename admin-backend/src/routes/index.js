@@ -5,6 +5,8 @@ const requireAuth = require('../middlewares/requireAuth');
 const authController      = require('../controllers/authController');
 const businessController  = require('../controllers/businessController');
 const productController   = require('../controllers/productController');
+const categoryController  = require('../controllers/categoryController');
+const importController    = require('../controllers/importController');
 const serviceController   = require('../controllers/serviceController');
 const promotionController = require('../controllers/promotionController');
 const hoursController     = require('../controllers/hoursController');
@@ -22,10 +24,17 @@ router.get('/dashboard', businessController.getStats);
 router.get('/business',  businessController.getInfo);
 router.put('/business',  businessController.updateInfo);
 
-// ── Categories (read-only helper for dropdowns) ───────────────────────────────
-router.get('/categories', productController.listCategories);
+// ── Categories ────────────────────────────────────────────────────────────────
+router.get('/categories',        categoryController.list);
+router.post('/categories',       categoryController.create);
+router.put('/categories/:id',    categoryController.update);
+router.delete('/categories/:id', categoryController.remove);
 
 // ── Products ──────────────────────────────────────────────────────────────────
+// Import routes must come before /:id to avoid Express matching "import" as an id
+router.post('/products/import/preview', importController.preview);
+router.post('/products/import/confirm', importController.confirm);
+
 router.get('/products',      productController.list);
 router.get('/products/:id',  productController.getById);
 router.post('/products',     productController.create);
