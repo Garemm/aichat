@@ -46,7 +46,7 @@ const { getKeywordResponse } = require('../mockai/keywordResponses');
 const { getMockOpenAIResponse, getRAGOpenAIResponse } = require('../temp/mockOpenAI');
 const { shouldUseAI, hasRelevantData } = require('./aiDecisionEngine');
 const { filterRelevantData } = require('./ragFilterService');
-const { searchByAttributes, formatAttributeResponse } = require('./attributeSearchService');
+const { searchByAttributes, searchByCompoundQuery, formatAttributeResponse, formatCompoundQueryResponse } = require('./attributeSearchService');
 const { extractAttribute } = require('./attributeExtractor');
 
 /** Minimum score to consider intent as "high confidence" (skip context). */
@@ -403,6 +403,9 @@ function decide(intentResult, entityResult, context, normalizedText) {
         type: 'attribute',
         value: entityResult.value,
         attributeType: entityResult.attributeType,
+        // Compound query fields (present only for "entity de attribute" patterns)
+        entityTerm: entityResult.entityTerm ?? null,
+        attributeTerm: entityResult.attributeTerm ?? null,
       },
       usedContext: false,
       reason: `attribute detected: "${entityResult.value}" (${entityResult.attributeType})`,
@@ -693,6 +696,19 @@ async function executeDecision(decision, originalText, businessId, context, sess
   // ── Attribute search: "algo con X", "para madera", "que tenga wifi" ──────────
   if (decision.strategy === 'attribute') {
     try {
+      // Compound query path: "tornillos de madera", "carne de res", etc.
+      // Uses strict 3-layer search to prevent false positives.
+      if (decision.entity.entityTerm) {
+        const compound = {
+          entity:     decision.entity.entityTerm,
+          attribute:  decision.entity.attributeTerm,
+          fullPhrase: decision.entity.value,
+        };
+        const { rows, strategy } = await searchByCompoundQuery(compound, businessId);
+        return formatCompoundQueryResponse(compound, rows, strategy);
+      }
+
+      // Standard attribute path: "algo con queso", "para madera", etc.
       const attributes = decision._attributes ?? [{ value: decision.entity.value, type: decision.entity.attributeType }];
       const { rows, strategy } = await searchByAttributes(attributes, businessId);
       return formatAttributeResponse(attributes, rows, strategy);

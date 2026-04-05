@@ -71,43 +71,54 @@ const ChatWindow = () => {
     <div className="chat-window">
       <motion.header
         className="chat-header"
-        initial={{ opacity: 0, y: -8 }}
+        initial={{ opacity: 0, y: -12 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.3, ease: 'easeOut' }}
+        transition={{ duration: 0.35, ease: 'easeOut' }}
       >
+        {/* Animated gradient shimmer line */}
+        <span className="chat-header__shimmer" aria-hidden="true" />
+
         <motion.div
           className="chat-header__avatar"
-          whileHover={{ scale: 1.08 }}
-          transition={{ type: 'spring', stiffness: 350, damping: 20 }}
+          whileHover={{ scale: 1.1, rotate: 6 }}
+          transition={{ type: 'spring', stiffness: 380, damping: 18 }}
         >
           {displayName[0]}
         </motion.div>
+
         <div className="chat-header__info">
           <div className="chat-header__name">{displayName}</div>
-          <div className={statusClass}>{statusText}</div>
+          <div className={statusClass}>
+            <span className="chat-header__dot" aria-hidden="true" />
+            {statusText}
+          </div>
         </div>
-        <motion.span
-          className="chat-header__user"
-          initial={{ opacity: 0, x: 10 }}
-          animate={{ opacity: 1, x: 0 }}
-          transition={{ delay: 0.15, duration: 0.25 }}
-        >
-          @{username}
-        </motion.span>
-        {ttsSupported && (
-          <motion.button
-            className={`voice-toggle${voiceEnabled ? ' voice-toggle--on' : ''}`}
-            onClick={handleToggleVoice}
-            title={voiceEnabled ? 'Desactivar respuestas por voz' : 'Activar respuestas por voz'}
-            aria-label={voiceEnabled ? 'Desactivar voz del asistente' : 'Activar voz del asistente'}
-            aria-pressed={voiceEnabled}
-            whileHover={{ scale: 1.12 }}
-            whileTap={{ scale: 0.88 }}
-            transition={{ type: 'spring', stiffness: 400, damping: 18 }}
+
+        <div className="chat-header__right">
+          <motion.span
+            className="chat-header__user"
+            initial={{ opacity: 0, x: 12 }}
+            animate={{ opacity: 1, x: 0 }}
+            transition={{ delay: 0.18, duration: 0.25 }}
           >
-            {voiceEnabled ? <SpeakerOnIcon /> : <SpeakerOffIcon />}
-          </motion.button>
-        )}
+            @{username}
+          </motion.span>
+
+          {ttsSupported && (
+            <motion.button
+              className={`voice-toggle${voiceEnabled ? ' voice-toggle--on' : ''}`}
+              onClick={handleToggleVoice}
+              title={voiceEnabled ? 'Desactivar respuestas por voz' : 'Activar respuestas por voz'}
+              aria-label={voiceEnabled ? 'Desactivar voz del asistente' : 'Activar voz del asistente'}
+              aria-pressed={voiceEnabled}
+              whileHover={{ scale: 1.12 }}
+              whileTap={{ scale: 0.88 }}
+              transition={{ type: 'spring', stiffness: 400, damping: 18 }}
+            >
+              {voiceEnabled ? <SpeakerOnIcon /> : <SpeakerOffIcon />}
+            </motion.button>
+          )}
+        </div>
       </motion.header>
       <MessageList />
       <MessageInput voice={voice} />

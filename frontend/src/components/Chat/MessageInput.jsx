@@ -23,11 +23,14 @@ const MessageInput = ({ voice }) => {
   // Destructure voice props with safe defaults
   const {
     isListening    = false,
+    isTranscribing = false,
     startListening = null,
     stopListening  = null,
     cancelSpeak    = null,
     transcript     = '',
-    clearTranscript = null,
+    clearTranscript  = null,
+    clearVoiceError  = null,
+    voiceError       = null,
     sttSupported   = false,
   } = voice || {};
 
@@ -84,18 +87,57 @@ const MessageInput = ({ voice }) => {
 
   // ── Voice mic toggle ──────────────────────────────────────────────────
   const handleVoiceToggle = useCallback(() => {
+    // Don't allow a new session while MediaRecorder is uploading to backend
+    if (isTranscribing) return;
+
+    clearVoiceError?.(); // dismiss any previous error on every new tap
     if (isListening) {
       stopListening?.();
     } else {
-      cancelSpeak?.();      // stop any TTS before recording
+      // cancelSpeak is also called inside startListening, but calling it here
+      // first gives immediate visual feedback (speaking indicator disappears
+      // before the mic opens).
+      cancelSpeak?.();
       startListening?.();
     }
-  }, [isListening, startListening, stopListening, cancelSpeak]);
+  }, [isListening, isTranscribing, startListening, stopListening, cancelSpeak, clearVoiceError]);
 
   const hasText = text.trim().length > 0;
 
+  const ERROR_LABELS = {
+    'not-allowed':          'Permiso de micrófono denegado. Abre la config del navegador y permite el micrófono.',
+    'service-not-allowed':  'El navegador bloqueó el micrófono. Revisa la config del sitio.',
+    'needs-https':          'El micrófono requiere HTTPS. Abre el chat con https:// en lugar de http://',
+    'no-mic':               'No se detectó micrófono en este dispositivo.',
+    'mic-busy':             'El micrófono está en uso por otra aplicación.',
+    'mic-error':            'No se pudo acceder al micrófono.',
+    'transcription-failed': 'Error al procesar el audio.',
+  };
+  const errorMsg = voiceError ? (ERROR_LABELS[voiceError] ?? 'Error de voz') : null;
+
   return (
-    <motion.div
+    <>
+      <AnimatePresence>
+        {errorMsg && (
+          <motion.div
+            className="voice-error-hint"
+            role="alert"
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{    opacity: 0, y: 6 }}
+            transition={{ duration: 0.2 }}
+          >
+            <span>{errorMsg}</span>
+            <button
+              type="button"
+              className="voice-error-hint__close"
+              aria-label="Cerrar"
+              onClick={clearVoiceError}
+            >✕</button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+      <motion.div
       className={`message-input${focused ? ' message-input--focused' : ''}${isListening ? ' message-input--listening' : ''}`}
       animate={{ boxShadow: isListening
         ? '0 -2px 16px rgba(239,68,68,0.14)'
@@ -112,10 +154,10 @@ const MessageInput = ({ voice }) => {
         onKeyDown={handleKeyDown}
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
-        placeholder={isListening ? 'Escuchando…' : 'Escribe un mensaje…'}
+        placeholder={isTranscribing ? 'Procesando…' : isListening ? 'Escuchando…' : 'Escribe un mensaje…'}
         autoComplete="off"
         maxLength={2000}
-        readOnly={isListening}
+        readOnly={isListening || isTranscribing}
       />
       {sttSupported && (
         <VoiceButton
@@ -156,6 +198,7 @@ const MessageInput = ({ voice }) => {
         </AnimatePresence>
       </motion.button>
     </motion.div>
+    </>
   );
 };
 

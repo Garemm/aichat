@@ -235,8 +235,69 @@ function extractAttribute(message) {
   return null;
 }
 
+// ─── Compound query extraction ────────────────────────────────────────────────
+
+/**
+ * Regex to strip common leading trigger words + optional article before matching
+ * the compound "entity de attribute" core pattern.
+ */
+const COMPOUND_TRIGGER_STRIP_RE =
+  /^(?:busco|quiero|tienes?|tienen|hay|necesito|venden?|tiene|dame|muestrame)\s+(?:un\s+|una\s+|el\s+|la\s+|los\s+|las\s+)?/;
+
+/**
+ * @typedef {Object} CompoundQuery
+ * @property {string} entity      - Main product type, e.g. "tornillos"
+ * @property {string} attribute   - Modifier / material / type, e.g. "madera"
+ * @property {string} fullPhrase  - Reconstructed phrase, e.g. "tornillos de madera"
+ */
+
+/**
+ * Detects compound "ENTITY de ATTRIBUTE" queries such as:
+ *   "tornillos de madera"  → entity: "tornillos", attribute: "madera"
+ *   "carne de res"         → entity: "carne",     attribute: "res"
+ *   "cables de cobre"      → entity: "cables",    attribute: "cobre"
+ *   "tienes tornillos de madera?" → same result after stripping trigger
+ *
+ * Returns null when:
+ *   - No "de" separator found
+ *   - Entity is a generic/meta word (in ATTR_BLOCKLIST)
+ *   - Attribute part is a numeric measure (handled by existing flow)
+ *
+ * @param {string} message  Raw or pre-normalized user message
+ * @returns {CompoundQuery|null}
+ */
+function extractCompoundQuery(message) {
+  const text = normalize(message);
+
+  // Strip leading trigger words and optional article to expose the core phrase
+  const stripped = text.replace(COMPOUND_TRIGGER_STRIP_RE, '').trim();
+
+  // Match: 1-3 entity words + "de" + 1-3 attribute words, with optional trailing "?"
+  const match = stripped.match(
+    /^(?<entity>[\wñ]+(?:\s+[\wñ]+){0,2})\s+de\s+(?<attribute>[\wñ]+(?:\s+[\wñ]+){0,3})\s*\??$/
+  );
+
+  if (!match?.groups) return null;
+
+  const entity = match.groups.entity.trim();
+  const attribute = match.groups.attribute.trim();
+
+  // Entity must not be a generic/meta word
+  if (isAttrBlocked(entity)) return null;
+
+  // Skip if entity itself is a single stopword (e.g. "el", "la", "un")
+  if (entity.length < 2) return null;
+
+  // Attribute must not be a numeric measure — those go through the existing measure path
+  if (isMeasure(attribute)) return null;
+
+  const fullPhrase = `${entity} de ${attribute}`;
+  return { entity, attribute, fullPhrase };
+}
+
 module.exports = {
   extractAttribute,
+  extractCompoundQuery,
   isAttributeQuery,
   classifyAttributeType,
   isMeasure,

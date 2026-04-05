@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useParams, Navigate, useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ChatProvider, useChat } from '../context/ChatContext';
@@ -107,9 +107,24 @@ const ChatPage = () => {
   const { state }      = useLocation();
   const bizId          = parseInt(businessId, 10);
 
-  if (!bizId || isNaN(bizId)) return <Navigate to="/" replace />;
+  const [businessName, setBusinessName] = useState(state?.name || '');
+  const [loadingName, setLoadingName]   = useState(!state?.name);
 
-  const businessName = state?.name || '';
+  // If the user lands directly on the URL (no router state), fetch the name
+  useEffect(() => {
+    if (state?.name || !bizId) return;
+    fetch('/api/business')
+      .then((r) => r.ok ? r.json() : Promise.reject())
+      .then(({ data }) => {
+        const match = data.find((b) => b.id === bizId);
+        if (match) setBusinessName(match.name);
+      })
+      .catch(() => {})
+      .finally(() => setLoadingName(false));
+  }, [bizId, state?.name]);
+
+  if (!bizId || isNaN(bizId)) return <Navigate to="/" replace />;
+  if (loadingName) return null; // brief flash while fetching name
 
   return (
     <ChatProvider businessId={bizId} businessName={businessName}>

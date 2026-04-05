@@ -48,6 +48,7 @@ const db = require('../../src/config/database');
 
 const {
   extractAttribute,
+  extractCompoundQuery,
   isAttributeQuery,
   classifyAttributeType,
   isMeasure,
@@ -56,7 +57,9 @@ const {
 const {
   searchByAttribute,
   searchByAttributes,
+  searchByCompoundQuery,
   formatAttributeResponse,
+  formatCompoundQueryResponse,
   buildAttributeConditions,
 } = require('../../src/services/attributeSearchService');
 
@@ -426,5 +429,389 @@ describe('processMessage() — attribute strategy', () => {
     expect(result.decision.strategy).not.toBe('ai');
     expect(mockGetMockOpenAI).not.toHaveBeenCalled();
     expect(mockGetRAGOpenAI).not.toHaveBeenCalled();
+  });
+});
+
+// ─── extractCompoundQuery ────────────────────────────────────────────────────
+
+describe('attributeExtractor — extractCompoundQuery()', () => {
+  describe('detects compound queries correctly', () => {
+    const CASES = [
+      ['tornillos de madera',        { entity: 'tornillos', attribute: 'madera',  fullPhrase: 'tornillos de madera'  }],
+      ['carne de res',               { entity: 'carne',     attribute: 'res',     fullPhrase: 'carne de res'         }],
+      ['cables de cobre',            { entity: 'cables',    attribute: 'cobre',   fullPhrase: 'cables de cobre'      }],
+      ['cable de cobre',             { entity: 'cable',     attribute: 'cobre',   fullPhrase: 'cable de cobre'       }],
+      ['tornillo de madera',         { entity: 'tornillo',  attribute: 'madera',  fullPhrase: 'tornillo de madera'   }],
+      ['tienes tornillos de madera', { entity: 'tornillos', attribute: 'madera',  fullPhrase: 'tornillos de madera'  }],
+      ['busco carne de res',         { entity: 'carne',     attribute: 'res',     fullPhrase: 'carne de res'         }],
+    ];
+
+    test.each(CASES)('"%s"', (input, expected) => {
+      const result = extractCompoundQuery(input);
+      expect(result).not.toBeNull();
+      expect(result.entity).toBe(expected.entity);
+      expect(result.attribute).toBe(expected.attribute);
+      expect(result.fullPhrase).toBe(expected.fullPhrase);
+    });
+  });
+
+  describe('returns null for non-compound queries', () => {
+    const NON_COMPOUND = [
+      'tornillos',                  // no "de" separator
+      'algo con queso',             // trigger-word attribute query (handled by extractAttribute)
+      'productos de acero',         // "productos" is a blocked meta-word
+      'cables de 2 metros',         // attribute is a measure → handled by existing flow
+      'precio de la pizza',         // "precio" is a blocked meta-word
+      'tienen hamburguesa',         // plain product query, no "de"
+    ];
+
+    test.each(NON_COMPOUND)('"%s" → null', (input) => {
+      expect(extractCompoundQuery(input)).toBeNull();
+    });
+  });
+});
+
+// ─── searchByCompoundQuery ───────────────────────────────────────────────────
+
+describe('attributeSearchService — searchByCompoundQuery()', () => {
+  const compound = { entity: 'tornillos', attribute: 'madera', fullPhrase: 'tornillos de madera' };
+
+  test('Layer 1 — returns results on exact phrase match', async () => {
+    const screwRows = [{ id: 1, name: 'Tornillos de madera 3"', price: 0.5, is_available: true, stock_quantity: 200, category: 'Tornillería' }];
+    db.query.mockResolvedValueOnce({ rows: screwRows });
+
+    const { rows, strategy } = await searchByCompoundQuery(compound, 1);
+    expect(rows).toEqual(screwRows);
+    expect(strategy).toBe('exact');
+    expect(db.query).toHaveBeenCalledTimes(1);
+  });
+
+  test('Layer 2 — falls back to entity+attribute when no exact phrase match', async () => {
+    const screwRows = [{ id: 2, name: 'Tornillo para madera', price: 0.3, is_available: true, stock_quantity: 500, category: 'Tornillería' }];
+    db.query
+      .mockResolvedValueOnce({ rows: [] })       // Layer 1 miss
+      .mockResolvedValueOnce({ rows: screwRows }) // Layer 2 hit
+    ;
+
+    const { rows, strategy } = await searchByCompoundQuery(compound, 1);
+    expect(rows).toEqual(screwRows);
+    expect(strategy).toBe('entity+attribute');
+    expect(db.query).toHaveBeenCalledTimes(2);
+  });
+
+  test('Layer 2 — does NOT return results with only attribute (false positive prevention)', async () => {
+    // "martillo de madera" would match attribute-only; Layer 2 requires BOTH entity AND attribute.
+    // DB is called 3 times (all layers miss for entity+attribute) then returns entity-only
+    db.query
+      .mockResolvedValueOnce({ rows: [] })  // Layer 1 miss
+      .mockResolvedValueOnce({ rows: [] })  // Layer 2: entity+attribute miss
+      .mockResolvedValueOnce({ rows: [] })  // Layer 3: entity-only miss
+    ;
+
+    const { rows, strategy } = await searchByCompoundQuery(compound, 1);
+    expect(rows).toHaveLength(0);
+    expect(strategy).toBe('entity-only');
+    // Verify Layer 2 SQL includes both entity AND attribute in separate AND clauses
+    const layer2Call = db.query.mock.calls[1];
+    expect(layer2Call[0]).toMatch(/AND.*AND/s);
+  });
+
+  test('Layer 3 — falls back to entity-only when no combined match', async () => {
+    const entityRows = [{ id: 3, name: 'Tornillos hexagonales', price: 0.8, is_available: true, stock_quantity: 100, category: 'Tornillería' }];
+    db.query
+      .mockResolvedValueOnce({ rows: [] })        // Layer 1 miss
+      .mockResolvedValueOnce({ rows: [] })        // Layer 2 miss
+      .mockResolvedValueOnce({ rows: entityRows }) // Layer 3 hit
+    ;
+
+    const { rows, strategy } = await searchByCompoundQuery(compound, 1);
+    expect(rows).toEqual(entityRows);
+    expect(strategy).toBe('entity-only');
+  });
+
+  test('"carne de res" — valid compound query returns carne+res results', async () => {
+    const carneRows = [{ id: 5, name: 'Carne de res premium', price: 12, is_available: true, stock_quantity: 20, category: 'Carnes' }];
+    db.query.mockResolvedValueOnce({ rows: carneRows });
+
+    const { rows, strategy } = await searchByCompoundQuery(
+      { entity: 'carne', attribute: 'res', fullPhrase: 'carne de res' },
+      1
+    );
+    expect(rows).toEqual(carneRows);
+    expect(strategy).toBe('exact');
+  });
+});
+
+// ─── formatCompoundQueryResponse ────────────────────────────────────────────
+
+describe('attributeSearchService — formatCompoundQueryResponse()', () => {
+  const compound = { entity: 'tornillos', attribute: 'madera', fullPhrase: 'tornillos de madera' };
+
+  test('returns not-found message when rows empty', () => {
+    const msg = formatCompoundQueryResponse(compound, []);
+    expect(msg).toMatch(/no encontr/i);
+    expect(msg).toMatch(/tornillos de madera/);
+  });
+
+  test('formats single product correctly', () => {
+    const rows = [{ id: 1, name: 'Tornillo madera 3"', price: 0.5, is_available: true, stock_quantity: 200, category: 'Tornillería', description: null }];
+    const msg = formatCompoundQueryResponse(compound, rows, 'exact');
+    expect(msg).toMatch(/Tornillo madera/);
+    expect(msg).toMatch(/0\.50/);
+    expect(msg).not.toMatch(/solo coincide con/i);
+  });
+
+  test('includes fallback note when strategy is entity-only', () => {
+    const rows = [{ id: 2, name: 'Tornillos hexagonales', price: 0.8, is_available: true, stock_quantity: 10, category: 'Tornillería' }];
+    const msg = formatCompoundQueryResponse(compound, rows, 'entity-only');
+    expect(msg).toMatch(/tornillos/i);
+    expect(msg).toMatch(/tornillos de madera/i);
+  });
+});
+
+// ─── Pipeline — compound query strategy ─────────────────────────────────────
+
+describe('processMessage() — compound query strategy', () => {
+  test('"tornillos de madera" → strategy=attribute, compound path', async () => {
+    const screwRows = [
+      { id: 1, name: 'Tornillos de madera', price: 0.5, is_available: true, stock_quantity: 200, category: 'Tornillería' },
+    ];
+    // Layer 1 of searchByCompoundQuery hits
+    db.query.mockResolvedValueOnce({ rows: screwRows });
+
+    const result = await processMessage({
+      text: 'tornillos de madera',
+      sessionId: 'test-compound-1',
+      businessId: 1,
+    });
+
+    expect(result.decision.strategy).toBe('attribute');
+    expect(result.decision.entity.entityTerm).toBe('tornillos');
+    expect(result.decision.entity.attributeTerm).toBe('madera');
+    expect(result.replyText).toMatch(/Tornillos de madera/);
+    expect(mockGetMockOpenAI).not.toHaveBeenCalled();
+    expect(mockGetRAGOpenAI).not.toHaveBeenCalled();
+  });
+
+  test('"tornillos de madera" must NOT return "martillo de madera"', async () => {
+    // Simulate: Layer 1 miss, Layer 2 miss (no product has both tornillo+madera),
+    // Layer 3 hit returns only screw-type products (not hammers).
+    const entityOnlyRows = [
+      { id: 10, name: 'Tornillos para drywall', price: 0.4, is_available: true, stock_quantity: 300, category: 'Tornillería' },
+    ];
+    const hammerRow = { id: 20, name: 'Martillo de madera', price: 15, is_available: true, stock_quantity: 5, category: 'Herramientas' };
+
+    // Layer 1: exact phrase miss
+    db.query.mockResolvedValueOnce({ rows: [] });
+    // Layer 2: entity+attribute miss (tornillo AND madera → nothing)
+    db.query.mockResolvedValueOnce({ rows: [] });
+    // Layer 3: entity-only → returns screw rows (not hammer)
+    db.query.mockResolvedValueOnce({ rows: entityOnlyRows });
+
+    const result = await processMessage({
+      text: 'tornillos de madera',
+      sessionId: 'test-compound-2',
+      businessId: 1,
+    });
+
+    expect(result.replyText).not.toMatch(/Martillo/i);
+    expect(result.replyText).toMatch(/Tornillos/i);
+    // hammerRow must not appear
+    expect(result.replyText).not.toContain(hammerRow.name);
+  });
+
+  test('"carne de res" → strategy=attribute, compound path', async () => {
+    const carneRows = [
+      { id: 5, name: 'Carne de res molida', price: 12, is_available: true, stock_quantity: 20, category: 'Carnes' },
+    ];
+    db.query.mockResolvedValueOnce({ rows: carneRows });
+
+    const result = await processMessage({
+      text: 'carne de res',
+      sessionId: 'test-compound-3',
+      businessId: 1,
+    });
+
+    expect(result.decision.strategy).toBe('attribute');
+    expect(result.decision.entity.entityTerm).toBe('carne');
+    expect(result.decision.entity.attributeTerm).toBe('res');
+    expect(result.replyText).toMatch(/Carne de res/);
+    expect(mockGetMockOpenAI).not.toHaveBeenCalled();
+  });
+
+  test('"cables de cobre" → compound query, not attribute-only', async () => {
+    db.query.mockResolvedValueOnce({ rows: [] }); // Layer 1
+    db.query.mockResolvedValueOnce({ rows: [] }); // Layer 2
+    db.query.mockResolvedValueOnce({ rows: [] }); // Layer 3
+
+    const result = await processMessage({
+      text: 'cables de cobre',
+      sessionId: 'test-compound-4',
+      businessId: 2,
+    });
+
+    expect(result.decision.strategy).toBe('attribute');
+    expect(result.decision.entity.entityTerm).toBe('cables');
+    expect(result.decision.entity.attributeTerm).toBe('cobre');
+    // not-found message should not contain unrelated products
+    expect(result.replyText).toMatch(/no encontr/i);
+    expect(mockGetMockOpenAI).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Embedded compound inside "algo con" attribute query ─────────────────────
+
+describe('entityDetector — embedded compound in attribute value', () => {
+  test('"tiene algo con carne de res" → promoted to compound query', async () => {
+    const result = await detectEntities('tiene algo con carne de res', 1, { intent: null, score: 0 });
+    expect(result.type).toBe('attribute');
+    expect(result.entityTerm).toBe('carne');
+    expect(result.attributeTerm).toBe('res');
+    expect(result.value).toBe('carne de res');
+    expect(db.query).not.toHaveBeenCalled();
+  });
+
+  test('"hay algo con tornillos de madera" → promoted to compound query', async () => {
+    const result = await detectEntities('hay algo con tornillos de madera', 1, { intent: null, score: 0 });
+    expect(result.type).toBe('attribute');
+    expect(result.entityTerm).toBe('tornillos');
+    expect(result.attributeTerm).toBe('madera');
+  });
+});
+
+describe('processMessage() — "tiene algo con" embedded compound', () => {
+  test('"tiene algo con carne de res" → finds caldo de res via Layer 2b (attribute-only)', async () => {
+    const carneRows = [
+      { id: 10, name: 'Caldo de res', price: 8, is_available: true, stock_quantity: 5, category: 'Sopas' },
+    ];
+    // Layer 1: exact "carne de res" phrase miss
+    db.query.mockResolvedValueOnce({ rows: [] });
+    // Layer 2: entity(carne) AND attribute(res) → "caldo de res" has "res" but NOT "carne" → miss
+    db.query.mockResolvedValueOnce({ rows: [] });
+    // Layer 2b: attribute-only "res" (word-boundary) → "Caldo de res" name has "res" standalone ✓
+    // Activated because "res" is NOT a material word.
+    db.query.mockResolvedValueOnce({ rows: carneRows });
+
+    const result = await processMessage({
+      text: 'tiene algo con carne de res',
+      sessionId: 'test-embedded-1',
+      businessId: 1,
+    });
+
+    expect(result.decision.strategy).toBe('attribute');
+    expect(result.decision.entity.entityTerm).toBe('carne');
+    expect(result.decision.entity.attributeTerm).toBe('res');
+    expect(result.replyText).toMatch(/Caldo de res/);
+    expect(mockGetMockOpenAI).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Word-boundary matching (regex) ─────────────────────────────────────────
+
+describe('attributeSearchService — word-boundary matching safety', () => {
+  test('"res" as attribute does NOT match products where "res" appears only inside another word', async () => {
+    // "res" is NOT a material → Layer 2b (attribute-only) also runs.
+    // All 4 layers return empty → no Agua fresca false positive.
+    db.query
+      .mockResolvedValueOnce({ rows: [] })  // Layer 1: exact phrase miss
+      .mockResolvedValueOnce({ rows: [] })  // Layer 2: entity+attribute miss
+      .mockResolvedValueOnce({ rows: [] })  // Layer 2b: attribute-only "res" miss
+      .mockResolvedValueOnce({ rows: [] }); // Layer 3: entity-only miss
+
+    const { rows, strategy } = await searchByCompoundQuery(
+      { entity: 'carne', attribute: 'res', fullPhrase: 'carne de res' },
+      1
+    );
+    // No false positives — result is empty, not "Agua fresca"
+    expect(rows).toHaveLength(0);
+    expect(strategy).toBe('entity-only');
+    // Verify Layer 2 SQL uses ~* (word-boundary regex) not ILIKE %res%
+    const layer2Sql = db.query.mock.calls[1][0];
+    expect(layer2Sql).toMatch(/~\*/);
+    // Must NOT use %res% ILIKE for the single-word attribute
+    const layer2Params = db.query.mock.calls[1][1];
+    const hasSubstringParam = layer2Params.some((p) => p === '%res%');
+    expect(hasSubstringParam).toBe(false);
+    // The word-boundary pattern should be present
+    const hasBoundaryParam = layer2Params.some((p) => typeof p === 'string' && p.includes('\\mres\\M'));
+    expect(hasBoundaryParam).toBe(true);
+  });
+
+  test('"madera" (material) skips Layer 2b — only 3 DB calls for tornillos/madera', async () => {
+    // "madera" IS a material → Layer 2b is skipped entirely.
+    // Exactly 3 DB calls: Layer 1, Layer 2, Layer 3.
+    const entityRows = [{ id: 3, name: 'Tornillos para madera', price: 0.5, is_available: true, stock_quantity: 100, category: 'Tornillería' }];
+    db.query
+      .mockResolvedValueOnce({ rows: [] })         // Layer 1
+      .mockResolvedValueOnce({ rows: [] })         // Layer 2
+      .mockResolvedValueOnce({ rows: entityRows }); // Layer 3 hit
+
+    const { rows, strategy } = await searchByCompoundQuery(
+      { entity: 'tornillos', attribute: 'madera', fullPhrase: 'tornillos de madera' },
+      1
+    );
+    expect(rows).toEqual(entityRows);
+    expect(strategy).toBe('entity-only');
+    // Exactly 3 queries — Layer 2b was NOT called
+    expect(db.query).toHaveBeenCalledTimes(3);
+  });
+
+  test('Layer 2b activated for non-material attribute ("res") — finds via attribute-only', async () => {
+    const caldoRow = [{ id: 11, name: 'Caldo de res', price: 8, is_available: true, stock_quantity: 5, category: 'Sopas' }];
+    db.query
+      .mockResolvedValueOnce({ rows: [] })      // Layer 1
+      .mockResolvedValueOnce({ rows: [] })      // Layer 2
+      .mockResolvedValueOnce({ rows: caldoRow }); // Layer 2b hit
+
+    const { rows, strategy } = await searchByCompoundQuery(
+      { entity: 'carne', attribute: 'res', fullPhrase: 'carne de res' },
+      1
+    );
+    expect(rows).toEqual(caldoRow);
+    expect(strategy).toBe('attribute-only');
+    // Layer 2b SQL must use word-boundary regex
+    const layer2bSql = db.query.mock.calls[2][0];
+    expect(layer2bSql).toMatch(/~\*/);
+    // Layer 2b must also search product_attributes
+    expect(layer2bSql).toMatch(/product_attributes/);
+    expect(db.query).toHaveBeenCalledTimes(3);
+  });
+
+  test('Layer 2 finds hamburguesas via product_attributes when they have "res" in attrs', async () => {
+    // Hamburguesa has product_attributes.value = 'carne de res' → both 'carne' and 'res' match
+    const hamburguerRows = [
+      { id: 20, name: 'Hamburguesa clásica', price: 10, is_available: true, stock_quantity: 8, category: 'Hamburguesas' },
+      { id: 21, name: 'Hamburguesa BBQ', price: 12, is_available: true, stock_quantity: 5, category: 'Hamburguesas' },
+    ];
+    db.query
+      .mockResolvedValueOnce({ rows: [] })            // Layer 1 miss
+      .mockResolvedValueOnce({ rows: hamburguerRows }); // Layer 2: product_attributes hit
+
+    const { rows, strategy } = await searchByCompoundQuery(
+      { entity: 'carne', attribute: 'res', fullPhrase: 'carne de res' },
+      1
+    );
+    expect(rows).toEqual(hamburguerRows);
+    expect(strategy).toBe('entity+attribute');
+    // Verify Layer 2 SQL searches product_attributes for both terms
+    const layer2Sql = db.query.mock.calls[1][0];
+    expect(layer2Sql).toMatch(/product_attributes/);
+    expect(db.query).toHaveBeenCalledTimes(2);
+  });
+
+  test('"carne de res" exact phrase uses ILIKE in Layer 1 (including product_attributes)', async () => {
+    const rows = [{ id: 1, name: 'Carne de res molida', price: 10, is_available: true, stock_quantity: 5, category: 'Carnes' }];
+    db.query.mockResolvedValueOnce({ rows });
+
+    const result = await searchByCompoundQuery(
+      { entity: 'carne', attribute: 'res', fullPhrase: 'carne de res' },
+      1
+    );
+    expect(result.strategy).toBe('exact');
+    const layer1Sql = db.query.mock.calls[0][0];
+    expect(layer1Sql).toMatch(/ILIKE/);
+    expect(layer1Sql).toMatch(/product_attributes/);
+    const layer1Params = db.query.mock.calls[0][1];
+    expect(layer1Params.some((p) => p === '%carne de res%')).toBe(true);
   });
 });

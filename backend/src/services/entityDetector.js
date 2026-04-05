@@ -27,7 +27,7 @@
 const nlp = require('compromise');
 const db  = require('../config/database');
 const { normalize, toSingular, wordVariants } = require('./normalize');
-const { extractAttribute } = require('./attributeExtractor');
+const { extractAttribute, extractCompoundQuery, isMaterial } = require('./attributeExtractor');
 
 // ─── Stopwords ────────────────────────────────────────────────────────────────
 
@@ -401,11 +401,44 @@ async function detectEntities(message, businessId, intentResult = { intent: null
 
   const normalizedText = normalize(message);
 
+  // ── Compound query ("entity de attribute") — runs before attribute check ─────
+  // Handles "tornillos de madera", "carne de res", "cables de cobre", etc.
+  // Requires BOTH entity and attribute to be meaningful; blocked for meta-words.
+  const compoundExtracted = extractCompoundQuery(normalizedText);
+  if (compoundExtracted) {
+    const attrType = isMaterial(compoundExtracted.attribute) ? 'material' : 'feature';
+    return {
+      ...empty,
+      type: 'attribute',
+      value: compoundExtracted.fullPhrase,
+      entityTerm: compoundExtracted.entity,
+      attributeTerm: compoundExtracted.attribute,
+      attributeType: attrType,
+    };
+  }
+
   // ── Attribute query (highest priority for "algo con X", "para X", etc.) ─────
   // Must run before candidate extraction so "algo con queso" isn't mis-routed
   // as a generic product query for the word "queso".
   const attrExtracted = extractAttribute(normalizedText);
   if (attrExtracted) {
+    // If the extracted attribute value itself contains a "de" compound
+    // (e.g. "carne de res" extracted from "tiene algo con carne de res"),
+    // promote it to the compound query path for strict entity+attribute search.
+    if (attrExtracted.value.includes(' de ')) {
+      const innerCompound = extractCompoundQuery(attrExtracted.value);
+      if (innerCompound) {
+        const attrType = isMaterial(innerCompound.attribute) ? 'material' : 'feature';
+        return {
+          ...empty,
+          type: 'attribute',
+          value: innerCompound.fullPhrase,
+          entityTerm: innerCompound.entity,
+          attributeTerm: innerCompound.attribute,
+          attributeType: attrType,
+        };
+      }
+    }
     return {
       ...empty,
       type: 'attribute',
