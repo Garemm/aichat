@@ -1399,23 +1399,23 @@ describe('Disponibilidad de productos', () => {
 
   // ── Pipeline: producto disponible ─────────────────────────────────────────
 
-  test('producto disponible → replyText contiene ✅', async () => {
+  test('producto disponible → replyText menciona el nombre', async () => {
     const id = sid();
     mockDbProduct(mockAvailable);
 
     const { replyText } = await processMessage({ text: '¿Tienen pizza pepperoni?', sessionId: id, businessId: BUSINESS_ID });
 
-    expect(replyText).toContain('✅');
+    expect(replyText).toMatch(/tenemos|disponible/i);
     expect(replyText).toContain('Pizza Pepperoni');
   });
 
-  test('producto NO disponible → replyText contiene ❌', async () => {
+  test('producto NO disponible → replyText indica no disponible', async () => {
     const id = sid();
     mockDbProduct(mockUnavailable);
 
     const { replyText } = await processMessage({ text: '¿Tienen pizza mexicana?', sessionId: id, businessId: BUSINESS_ID });
 
-    expect(replyText).toContain('❌');
+    expect(replyText).toMatch(/no está disponible/i);
     expect(replyText).toContain('Pizza Mexicana');
   });
 
@@ -1430,7 +1430,7 @@ describe('Disponibilidad de productos', () => {
     });
 
     expect(decision.entity.value).toBe('pizza pepperoni');
-    expect(replyText).toContain('✅');
+    expect(replyText).toMatch(/tenemos|disponible/i);
   });
 
   test('"hay stock de hamburguesa" → detecta entidad hamburguesa', async () => {
@@ -1448,7 +1448,7 @@ describe('Disponibilidad de productos', () => {
     expect(decision.strategy).toBe('entity');
   });
 
-  test('stock_quantity=0 disponible=false → replyText muestra ❌ y stock 0', async () => {
+  test('stock_quantity=0 disponible=false → replyText indica no disponible', async () => {
     const id = sid();
     mockDbProduct(mockUnavailable);
 
@@ -1458,8 +1458,7 @@ describe('Disponibilidad de productos', () => {
       businessId: BUSINESS_ID,
     });
 
-    expect(replyText).toContain('❌');
-    expect(replyText).toContain('0');
+    expect(replyText).toMatch(/no está disponible/i);
   });
 
   test('consulta disponibilidad → queda en contexto para follow-up', async () => {

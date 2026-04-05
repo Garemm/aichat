@@ -27,7 +27,7 @@
 const nlp = require('compromise');
 const db  = require('../config/database');
 const { normalize, toSingular, wordVariants } = require('./normalize');
-const { extractAttribute, extractCompoundQuery, isMaterial } = require('./attributeExtractor');
+const { extractAttribute, extractCompoundQuery, extractCategoryAttributeQuery, isMaterial } = require('./attributeExtractor');
 
 // ─── Stopwords ────────────────────────────────────────────────────────────────
 
@@ -404,7 +404,32 @@ async function detectEntities(message, businessId, intentResult = { intent: null
   // ── Compound query ("entity de attribute") — runs before attribute check ─────
   // Handles "tornillos de madera", "carne de res", "cables de cobre", etc.
   // Requires BOTH entity and attribute to be meaningful; blocked for meta-words.
-  const compoundExtracted = extractCompoundQuery(normalizedText);
+  //
+  // ── Category + attribute query ("algún/alguna CATEGORY con|de ATTRIBUTE") ────
+  // Fires before the compound/skipCompound guard so that
+  // "tiene alguna bebida con chocolate" is routed to category+attribute search
+  // instead of falling through to product-name extraction.
+  const catAttrExtracted = extractCategoryAttributeQuery(normalizedText);
+  if (catAttrExtracted) {
+    return {
+      ...empty,
+      type: 'attribute',
+      value: `${catAttrExtracted.categoryWord} con ${catAttrExtracted.attribute}`,
+      categoryTerm: catAttrExtracted.categoryWord,
+      attributeTerm: catAttrExtracted.attribute,
+      attributeType: 'feature',
+    };
+  }
+
+  // Guard: skip compound detection when the message starts with an
+  // existence-question verb (tiene / tienes / tienen).  In those messages the
+  // full phrase after the verb is the PRODUCT NAME, not a compound type+attr
+  // query.  e.g. "tienen agua de limon" → entity="agua de limon" (product),
+  // NOT compound entity="agua" + attribute="limon".
+  // Note: "tiene algo con carne de res" is NOT guarded (extractAttribute fires
+  // first) and its embedded compound is promoted via the inner-compound check.
+  const skipCompound = /^tiene[sn]?\s/.test(normalizedText);
+  const compoundExtracted = skipCompound ? null : extractCompoundQuery(normalizedText);
   if (compoundExtracted) {
     const attrType = isMaterial(compoundExtracted.attribute) ? 'material' : 'feature';
     return {
@@ -521,40 +546,42 @@ async function detectEntities(message, businessId, intentResult = { intent: null
  * @param {Array} products
  * @returns {string}
  */
+/** Max products to name in a conversational list. */
+const VOICE_LIST_LIMIT = 3;
+
+/** "A, B y C" natural enumeration (voice-friendly). */
+function _enumList(items) {
+  if (items.length === 0) return '';
+  if (items.length === 1) return items[0];
+  return `${items.slice(0, -1).join(', ')} y ${items[items.length - 1]}`;
+}
+
 function formatProductResponse(entity, products) {
   if (!products || products.length === 0) {
-    return `Lo siento, no encontré ningún producto relacionado con "*${entity}*". ¿Quieres ver el catálogo completo?`;
+    return `Lo siento, no encontré ningún producto relacionado con "${entity}". ¿Quieres ver el catálogo completo?`;
   }
 
   if (products.length === 1) {
     const p = products[0];
     const available = p.is_available !== false;
-    const stock  = p.stock_quantity != null ? `\n  📦 Stock: ${p.stock_quantity} uds.` : '';
-    const cat    = p.category ? `\n  🏷️ Categoría: ${p.category}` : '';
-    const desc   = p.description ? `\n  📝 ${p.description}` : '';
     if (available) {
-      return (
-        `¡Sí, tenemos *${p.name}*! ✅\n` +
-        `  💲 Precio: $${Number(p.price).toFixed(2)}` +
-        stock + cat + desc
-      );
+      return `Sí 😊, tenemos ${p.name} a $${Number(p.price).toFixed(2)}. ¿Te interesa o quieres saber algo más?`;
     }
-    return (
-      `*${p.name}* ❌ no está disponible actualmente.\n` +
-      `  💲 Precio referencial: $${Number(p.price).toFixed(2)}` +
-      stock + cat + desc
-    );
+    return `Tenemos ${p.name} registrado, pero no está disponible en este momento. ¿Te gustaría ver otras opciones?`;
   }
 
-  const lines = products.map((p) => {
-    const status = p.is_available ? '✅' : '❌';
-    const stock  = p.stock_quantity != null ? ` · stock: ${p.stock_quantity}` : '';
-    const cat    = p.category ? ` · ${p.category}` : '';
-    const desc   = p.description ? `\n      📝 ${p.description}` : '';
-    return `  • ${status} *${p.name}* — $${Number(p.price).toFixed(2)}${stock}${cat}${desc}`;
-  });
-  return `Tenemos *${products.length} tipos* de "*${entity}*":\n\n${lines.join('\n\n')}`;
-}//🔍 Encontré resultados para
+  const available = products.filter((p) => p.is_available !== false);
+  const pool      = available.length > 0 ? available : products;
+  const sample    = pool.slice(0, VOICE_LIST_LIMIT);
+  const hasMore   = pool.length > VOICE_LIST_LIMIT;
+  const names     = sample.map((p) => `${p.name} a $${Number(p.price).toFixed(2)}`);
+  const listed    = _enumList(names);
+
+  if (hasMore) {
+    return `Sí 😊, tenemos varias opciones de ${entity}, como ${listed}, entre otras. ¿Buscas algo en particular?`;
+  }
+  return `Sí 😊, tenemos ${pool.length} opciones de ${entity}: ${listed}. ¿Cuál te interesa?`;
+}
 
 /**
  * Formats category query results — lists products in that category.
@@ -564,14 +591,21 @@ function formatProductResponse(entity, products) {
  */
 function formatCategoryResponse(categoryName, rows) {
   if (!rows || rows.length === 0) {
-    return `No encontré productos en la categoría "*${categoryName}*".`;
+    return `No encontré productos en la categoría "${categoryName}".`;
   }
-  const lines = rows.map((p) => {
-    const status = p.is_available ? '✅' : '❌';
-    const stock  = p.stock_quantity != null ? ` · stock: ${p.stock_quantity}` : '';
-    return `  • ${status} *${p.name}* — $${Number(p.price).toFixed(2)}${stock}`;
-  });
-  return `📂 *Categoría: ${categoryName}*\n\n${lines.join('\n')}`;
+  const sample  = rows.slice(0, VOICE_LIST_LIMIT);
+  const hasMore = rows.length > VOICE_LIST_LIMIT;
+  const names   = sample.map((p) =>
+    p.is_available !== false
+      ? `${p.name} a $${Number(p.price).toFixed(2)}`
+      : `${p.name} (no disponible)`
+  );
+  const listed = _enumList(names);
+
+  if (hasMore) {
+    return `En ${categoryName} tenemos ${rows.length} productos, como ${listed}, entre otros. ¿Quieres saber más de alguno?`;
+  }
+  return `En ${categoryName} tenemos ${listed}. ¿Quieres más información de alguno?`;
 }
 
 module.exports = {

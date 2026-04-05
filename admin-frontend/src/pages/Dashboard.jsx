@@ -5,6 +5,7 @@ import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import Spinner from '../components/ui/Spinner';
 import Icon from '../components/ui/Icon';
+import TopProductsChart from '../components/ui/TopProductsChart';
 
 // ── Chat URL helper ──────────────────────────────────────────────────────────
 // Uses VITE_CHAT_BASE_URL env var if set; otherwise infers from current hostname
@@ -180,6 +181,8 @@ const Dashboard = () => {
           <p>{business.description}</p>
         </div>
       )}
+
+      <TopProductsChart />
 
       <ChatLinkCard businessId={businessId} />
     </div>

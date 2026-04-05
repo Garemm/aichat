@@ -3,7 +3,8 @@
 /**
  * src/services/intentResponseFormatter.js
  *
- * Converts raw DB rows into a human-readable Spanish text response.
+ * Converts raw DB rows into natural, conversational Spanish responses.
+ * Optimized for voice output: no emojis, no bullet lists, no markdown symbols.
  * One formatter per intent. Add a new entry to FORMATTERS when adding a new intent.
  */
 
@@ -19,10 +20,20 @@ function formatTime(t) {
   return `${h12}:${m} ${ampm}`;
 }
 
+/** Max items to show in a conversational list before offering more. */
+const LIST_LIMIT = 3;
+
+/** Natural Spanish enumeration: ["A","B","C"] → "A, B y C". */
+function enumList(items) {
+  if (items.length === 0) return '';
+  if (items.length === 1) return items[0];
+  return `${items.slice(0, -1).join(', ')} y ${items[items.length - 1]}`;
+}
+
 /**
- * Renders a titled bullet list.
- * @param {string}   title  Header line (emoji + label)
- * @param {string[]} items  Each element becomes one "• item" line
+ * Renders a titled bullet list (kept for backward compatibility).
+ * @param {string}   title
+ * @param {string[]} items
  * @returns {string}
  */
 function formatList(title, items) {
@@ -31,102 +42,128 @@ function formatList(title, items) {
 
 const FORMATTERS = {
   horarios(rows) {
-    if (!rows || rows.length === 0) return '¡Claro! Aunque por el momento no encontré horarios registrados. No dudes en contactarnos para más información 😊';
-    const items = rows.map((r) => {
+    if (!rows || rows.length === 0) {
+      return 'Por el momento no tenemos los horarios registrados. No dudes en contactarnos para más información.';
+    }
+    const parts = rows.map((r) => {
       const day = DAYS[r.day_of_week] ?? `Día ${r.day_of_week}`;
-      if (r.is_closed) return `${day}: Cerrado 🔒`;
-      return `${day}: ${formatTime(r.open_time)} – ${formatTime(r.close_time)}`;
+      if (r.is_closed) return `el ${day} estamos cerrados`;
+      return `el ${day} de ${formatTime(r.open_time)} a ${formatTime(r.close_time)}`;
     });
-    return formatList('🕐 Nuestros Horarios de atención son:', items);
+    return `😊 Nuestros horarios: ${parts.join(', ')}. ¿Hay algo más en lo que te pueda ayudar?`;
   },
 
   productos(rows) {
-    if (!rows || rows.length === 0) return '¡Mmm! No encontré productos disponibles en este momento. ¿Te gustaría intentar con una búsqueda diferente?';
-    const byCat = new Map();
-    for (const r of rows) {
-      const key = r.category || 'General';
-      if (!byCat.has(key)) byCat.set(key, []);
-      byCat.get(key).push(r);
+    if (!rows || rows.length === 0) {
+      return 'Por ahora no tenemos productos registrados. ¿Te puedo ayudar con algo más?';
     }
-    const sections = [];
-    for (const [cat, items] of byCat) {
-      const header = byCat.size > 1 ? `📁 ${cat}\n` : '';
-      const lines = items.map((r) => {
-        const stock = r.stock_quantity != null ? ` · stock: ${r.stock_quantity}` : '';
-        const avail = r.is_available !== false ? '✅' : '❌';
-        return `• ${avail} ${r.name} — $${Number(r.price).toFixed(2)}${stock}`;
-      });
-      sections.push(header + lines.join('\n'));
+    const available = rows.filter((r) => r.is_available !== false);
+    const pool    = available.length > 0 ? available : rows;
+    const sample  = pool.slice(0, LIST_LIMIT);
+    const names   = sample.map((r) => r.name);
+    const hasMore = rows.length > LIST_LIMIT;
+    const listed  = enumList(names);
+
+    if (names.length === 1) {
+      return `😊 Tenemos ${names[0]} disponible. ¿Buscas algo en específico?`;
     }
-    return `📦 ¡Aquí te muestro nuestros productos disponibles!\n\n${sections.join('\n\n')}`;
+    if (hasMore) {
+      return `😊 Tenemos varias opciones, como ${listed}, entre otros. ¿Buscas algo en específico?`;
+    }
+    return `😊 Tenemos ${listed} disponibles. ¿Buscas algo en específico?`;
   },
 
   precios(rows) {
-    if (!rows || rows.length === 0) return 'Por el momento no encontré información de precios. ¿Puedo ayudarte con algo más?';
-    const items = rows.map((r) => `${r.name}: $${Number(r.price).toFixed(2)}`);
-    return formatList('💲 Lista de precios actualizada:', items);
+    if (!rows || rows.length === 0) {
+      return 'Por el momento no tengo información de precios disponible. ¿Te puedo ayudar con algo más?';
+    }
+    const sample  = rows.slice(0, LIST_LIMIT);
+    const items   = sample.map((r) => `${r.name} a $${Number(r.price).toFixed(2)}`);
+    const hasMore = rows.length > LIST_LIMIT;
+    const listed  = enumList(items);
+
+    if (items.length === 1) {
+      return `😊 El precio de ${listed}. ¿Necesitas saber el precio de algún otro producto?`;
+    }
+    if (hasMore) {
+      return `😊 Algunos precios: ${listed}, entre otros. ¿Quieres saber el precio de algún producto en particular?`;
+    }
+    return `😊 Los precios son: ${listed}. ¿Hay algo más en lo que te pueda ayudar?`;
   },
 
   promociones(rows) {
-    if (!rows || rows.length === 0) return 'No hay promociones activas en este momento, ¡pero estate al pendiente! 😊 ¿Puedo ayudarte con algo más?';
-    const items = rows.map((r) => {
+    if (!rows || rows.length === 0) {
+      return 'No hay promociones activas en este momento, pero estate al pendiente. ¿Te puedo ayudar con algo más?';
+    }
+    const sample = rows.slice(0, LIST_LIMIT);
+    const parts  = sample.map((r) => {
       const value =
         r.discount_type === 'percentage'
           ? `${r.discount_value}% de descuento`
           : `$${Number(r.discount_value).toFixed(2)} de descuento`;
-      const desc = r.description ? `\n  ${r.description}` : '';
-      return `${r.title} — ${value} (hasta ${r.end_date})${desc}`;
+      const until = r.end_date ? `, válida hasta ${r.end_date}` : '';
+      const desc  = r.description ? `: ${r.description}` : '';
+      return `${r.title} con ${value}${until}${desc}`;
     });
-    return formatList('🎉 Promociones activas:', items);
+    const hasMore = rows.length > LIST_LIMIT;
+    const listed  = enumList(parts);
+
+    if (parts.length === 1) {
+      return `😊 Tenemos la promoción ${parts[0]}. ¿Te interesa aprovecharlo?`;
+    }
+    if (hasMore) {
+      return `😊 Tenemos varias promociones activas, como ${listed}, entre otras. ¿Te gustaría más detalles?`;
+    }
+    return `😊 Tenemos ${parts.length} promociones activas: ${listed}. ¿Te interesa alguna?`;
   },
 
   ubicacion(row) {
-    if (!row) return '¡Ups! No encontré información de ubicación registrada. Contáctanos para darte los detalles 😊';
-    return `📍 ¡Aquí nos encuentras!\n• Negocio: ${row.name}\n• Ciudad: ${row.city}\n• ${row.description}`;
+    if (!row) return 'No tenemos la ubicación registrada. Contáctanos y te damos más detalles.';
+    const city = row.city ? `Nos encuentras en ${row.city}` : '';
+    const name = row.name ? (row.city ? `, en ${row.name}` : row.name) : '';
+    const desc = row.description ? ` ${row.description}.` : '';
+    return `😊 ${city}${name}.${desc} ¿Hay algo más en lo que te pueda ayudar?`.replace(/\s{2,}/g, ' ').trim();
   },
 
   comprar(row) {
-    if (!row) return '¡Ups! Por el momento no tenemos información disponible para guiarte en tu compra. Inténtalo de nuevo más tarde 😊';
-    const lines = [`🛒 ¡Me alegra que quieras realizar una compra con nosotros!`];
-    lines.push('');
-    if (row.webpage_link) {
-      lines.push(`🌐 Tienda en línea: ${row.webpage_link}`);
+    if (!row) {
+      return 'Por el momento no tengo información disponible para guiarte en la compra. Intenta de nuevo más tarde.';
     }
-    if (row.city) {
-      lines.push(`📍 También puedes visitarnos en: ${row.city}`);
-    }
-    if (row.description) {
-      lines.push(`💬 ${row.description}`);
-    }
-    lines.push('');
-    lines.push('¡Con gusto te atendemos! Si tienes dudas sobre algún producto o servicio, solo pregúntame 😊');
-    return lines.join('\n');
+    const parts = ['😊 Con gusto te ayudo con tu compra.'];
+    if (row.webpage_link) parts.push(`Puedes visitar nuestra tienda en línea en ${row.webpage_link}.`);
+    if (row.city) parts.push(`También puedes visitarnos en ${row.city}.`);
+    if (row.description) parts.push(row.description);
+    parts.push('Si tienes alguna duda, solo pregúntame.');
+    return parts.join(' ');
   },
 
   contacto(row) {
-    if (!row) return '¡Ups! No encontré información de contacto registrada. Intenta de nuevo más tarde 😊';
+    if (!row) return 'No encontramos información de contacto registrada. Intenta de nuevo más tarde.';
     const hasData = row.phone || row.email || row.webpage_link;
     if (!hasData) return 'Por el momento no tenemos datos de contacto registrados. ¿Te puedo ayudar con algo más?';
-    const lines = [`📞 ¡Aquí tienes nuestros datos de contacto!`];
-    lines.push('');
-    if (row.phone)        lines.push(`📱 Teléfono: ${row.phone}`);
-    if (row.email)        lines.push(`✉️  Correo: ${row.email}`);
-    if (row.webpage_link) lines.push(`🌐 Sitio web: ${row.webpage_link}`);
-    lines.push('');
-    lines.push('¡Con gusto te atendemos! 😊');
-    return lines.join('\n');
+    const parts = [];
+    if (row.phone)        parts.push(`llámanos al ${row.phone}`);
+    if (row.email)        parts.push(`escríbenos a ${row.email}`);
+    if (row.webpage_link) parts.push(`visita nuestro sitio en ${row.webpage_link}`);
+    return `😊 Puedes contactarnos: ${enumList(parts)}. ¿Hay algo más en lo que te pueda ayudar?`;
   },
 
   servicios(rows) {
-    if (!rows || rows.length === 0) return 'Por el momento no tenemos servicios registrados. ¿Puedo ayudarte con algo más?';
-    const items = rows.map((s) => {
-      const price = s.price != null ? ` — $${Number(s.price).toFixed(2)}` : '';
+    if (!rows || rows.length === 0) {
+      return 'Por el momento no tenemos servicios registrados. ¿Te puedo ayudar con algo más?';
+    }
+    const sample  = rows.slice(0, LIST_LIMIT);
+    const names   = sample.map((s) => {
+      const price = s.price != null ? ` (a $${Number(s.price).toFixed(2)})` : '';
       return `${s.name}${price}`;
     });
-    return (
-      formatList('🛎️ Estos son los servicios que ofrecemos:', items) +
-      '\n\n¿Te gustaría saber más detalles sobre alguno de ellos?'
-    );
+    const hasMore = rows.length > LIST_LIMIT;
+    const listed  = enumList(names);
+
+    if (hasMore) {
+      return `😊 Ofrecemos varios servicios, como ${listed}, entre otros. ¿Te gustaría saber más de alguno?`;
+    }
+    return `😊 Ofrecemos ${listed}. ¿Te gustaría saber más detalles sobre alguno?`;
   },
 };
 
@@ -156,14 +193,13 @@ function formatHorarioDay(normalizedDayKey, row) {
   };
   const display = DISPLAY[normalizedDayKey] ?? (normalizedDayKey.charAt(0).toUpperCase() + normalizedDayKey.slice(1));
 
-  if (!row) return `Hmm, no encontré horarios para el ${display}. ¿Quieres consultar otro día?`;
-  if (row.is_closed) return `El ${display} permanecemos cerrados. 🔒 ¡Te esperamos otro día!`;
-  return `El ${display} abrimos de ${formatTime(row.open_time)} a ${formatTime(row.close_time)}. 🕐 ¡Con gusto te atendemos!`;
+  if (!row) return `No encontré horarios para el ${display}. ¿Quieres consultar otro día?`;
+  if (row.is_closed) return `El ${display} permanecemos cerrados. ¿Hay algo más en lo que te pueda ayudar?`;
+  return `😊 El ${display} abrimos de ${formatTime(row.open_time)} a ${formatTime(row.close_time)}. ¿Hay algo más en lo que te pueda ayudar?`;
 }
 
 /**
  * Formats a product description response, putting the description first.
- * Unlike formatProductResponse which leads with price/availability.
  *
  * @param {string} entityValue  Queried entity name (raw user input)
  * @param {Array}  rows         Product rows from queryProducts
@@ -171,18 +207,18 @@ function formatHorarioDay(normalizedDayKey, row) {
  */
 function formatDescripcionResponse(entityValue, rows) {
   if (!rows || rows.length === 0) {
-    return `Hmm, no encontré información sobre "*${entityValue}*". ¿Quieres ver el catálogo completo?`;
+    return `No encontré información sobre "${entityValue}". ¿Quieres ver el catálogo completo?`;
   }
   const p = rows[0];
   const name = p.name ?? entityValue;
   if (!p.description) {
-    return `*${name}* aún no tiene descripción detallada disponible. ¿Te gustaría saber su precio o disponibilidad?`;
+    return `${name} aún no tiene descripción detallada disponible. ¿Te gustaría saber su precio o disponibilidad?`;
   }
-  return `*${name}*: ${p.description}`;
+  return `${name}: ${p.description}`;
 }
 
 /**
- * Formats a product's key/value attributes as a natural-sounding section.
+ * Formats a product's key/value attributes as a natural sentence.
  * Returns an empty string if there are no attributes for the given product.
  *
  * @param {Record<number, {key:string,value:string}[]>} attrsMap  Grouped by product_id
@@ -192,8 +228,8 @@ function formatDescripcionResponse(entityValue, rows) {
 function formatProductAttributes(attrsMap, productId) {
   const attrs = attrsMap[productId];
   if (!attrs || attrs.length === 0) return '';
-  const lines = attrs.map((a) => `• ${a.key}: ${a.value}`).join('\n');
-  return `\n\n✨ Características:\n${lines}`;
+  const parts = attrs.map((a) => `${a.key}: ${a.value}`);
+  return ` Sus características son: ${enumList(parts)}.`;
 }
 
 /**
@@ -204,12 +240,12 @@ function formatProductAttributes(attrsMap, productId) {
  */
 function formatServiceDetail(service) {
   const price = service.price != null
-    ? `\n  💲 Precio: $${Number(service.price).toFixed(2)}`
+    ? ` El precio es $${Number(service.price).toFixed(2)}.`
     : '';
   const desc = service.description
-    ? `\n  📝 ${service.description}`
+    ? ` ${service.description}`
     : '';
-  return `🛎️ *${service.name}*${price}${desc}`;
+  return `${service.name}.${price}${desc}`.trim();
 }
 
 module.exports = {

@@ -137,6 +137,10 @@ const ATTR_BLOCKLIST = new Set([
   'info', 'informacion', 'detalle', 'detalles',
   'producto', 'productos', 'articulo', 'articulos',
   'catalogo', 'lista', 'menu',
+  // Availability / inventory meta-words — never a compound entity
+  'stock', 'disponibilidad', 'disponible', 'disponibles',
+  // Description-query meta-words — never a compound entity
+  'descripcion', 'especificaciones', 'especificacion', 'caracteristicas', 'caracteristica',
   // Avoid extracting pure article-like fragments
   'el', 'la', 'los', 'las', 'un', 'una', 'unos', 'unas',
 ]);
@@ -295,9 +299,56 @@ function extractCompoundQuery(message) {
   return { entity, attribute, fullPhrase };
 }
 
+// ─── Category + attribute query extraction ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * Pattern that signals the user is asking for "any product of a category that
+ * has a certain attribute".
+ *
+ * Anchored to the END of the normalized message so the attribute is always the
+ * trailing part. The leading trigger (tiene/hay/busco/…) does not need to be
+ * captured — only the algún/alguna marker and the two content words matter.
+ *
+ * Examples (normalized):
+ *   "tiene alguna bebida con chocolate"  → categoryWord="bebida",  attribute="chocolate"
+ *   "hay algun postre de arroz"          → categoryWord="postre",   attribute="arroz"
+ *   "tienes alguna bebida de chocolate"  → categoryWord="bebida",  attribute="chocolate"
+ *   "busco algun postre con arroz"       → categoryWord="postre",   attribute="arroz"
+ */
+const CATEGORY_ATTR_RE =
+  /\balgun[ao]?\s+(?<cat>[\wñ]+(?:\s+[\wñ]+){0,2})\s+(?:con|de)\s+(?<attr>[\wñ]+(?:\s+[\wñ]+){0,3})\s*$/;
+
+/**
+ * Detects queries of the form "algún/alguna CATEGORY_WORD con|de ATTRIBUTE".
+ *
+ * Distinct from extractCompoundQuery (which handles "X de Y" product-name pairs
+ * like "carne de res") because here "algún/alguna" signals the user wants
+ * ANY product from a general category that possesses the attribute.
+ *
+ * @param {string} message  Raw or pre-normalized message
+ * @returns {{ categoryWord: string, attribute: string }|null}
+ */
+function extractCategoryAttributeQuery(message) {
+  const text = normalize(message);
+  const match = text.match(CATEGORY_ATTR_RE);
+  if (!match?.groups) return null;
+
+  const categoryWord = match.groups.cat.trim();
+  const attribute    = match.groups.attr.trim();
+
+  if (isAttrBlocked(categoryWord)) return null;
+  if (isAttrBlocked(attribute))    return null;
+  if (categoryWord.length < 2)     return null;
+  if (attribute.length < 2)        return null;
+  if (isMeasure(attribute))        return null;
+
+  return { categoryWord, attribute };
+}
+
 module.exports = {
   extractAttribute,
   extractCompoundQuery,
+  extractCategoryAttributeQuery,
   isAttributeQuery,
   classifyAttributeType,
   isMeasure,

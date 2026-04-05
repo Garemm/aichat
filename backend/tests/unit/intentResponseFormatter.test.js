@@ -5,11 +5,12 @@
  *
  * Unit tests for src/services/intentResponseFormatter.js
  *
- * Tests cover:
- *   - All 5 formatters (horarios, productos, precios, promociones, ubicacion)
- *   - Empty / null data → graceful fallback messages
- *   - formatTime edge cases (midnight, noon, AM/PM)
- *   - Unknown intent → safe fallback string
+ * Tests verify:
+ *   - Natural, conversational responses (no emojis, no bullet points)
+ *   - Voice-friendly output (no markdown symbols like *, •, —)
+ *   - Stock NOT included unless explicitly requested
+ *   - All intent formatters produce readable Spanish sentences
+ *   - Edge cases (empty data, null, midnight/noon times)
  */
 
 const { formatIntentResponse } = require('../../src/services/intentResponseFormatter');
@@ -23,13 +24,13 @@ const HORARIOS_ROWS = [
 ];
 
 const PRODUCTOS_ROWS = [
-  { name: 'Hamburguesa Doble', category: 'Hamburguesas', price: '150.00', stock_quantity: 30 },
-  { name: 'Refresco',          category: 'Bebidas',       price: '25.00',  stock_quantity: null },
+  { name: 'Hamburguesa Doble', category: 'Hamburguesas', price: '150.00', is_available: true,  stock_quantity: 30   },
+  { name: 'Refresco',          category: 'Bebidas',       price: '25.00',  is_available: true,  stock_quantity: null },
 ];
 
 const PRECIOS_ROWS = [
-  { name: 'Pozole Rojo',   price: '110.00' },
-  { name: 'Agua Mineral',  price: '20.00'  },
+  { name: 'Pozole Rojo',  price: '110.00' },
+  { name: 'Agua Mineral', price: '20.00'  },
 ];
 
 const PROMOCIONES_ROWS = [
@@ -58,15 +59,18 @@ const UBICACION_ROW = {
 // ─── horarios formatter ───────────────────────────────────────────────────────
 
 describe('formatIntentResponse("horarios", ...)', () => {
-  test('includes the header emoji and label', () => {
+  test('contains day names in plain text (no emojis)', () => {
     const result = formatIntentResponse('horarios', HORARIOS_ROWS);
-    expect(result).toContain('🕐');
-    expect(result).toContain('Horarios');
+    expect(result).toContain('Lunes');
+    expect(result).toContain('Viernes');
+    expect(result).toContain('Domingo');
+    expect(result).not.toMatch(/🕐|🔒|📅/);
   });
 
-  test('shows "Cerrado" for closed days', () => {
+  test('mentions closed day in natural sentence', () => {
     const result = formatIntentResponse('horarios', HORARIOS_ROWS);
-    expect(result).toContain('Domingo: Cerrado 🔒');
+    expect(result.toLowerCase()).toContain('cerrados');
+    expect(result.toLowerCase()).toContain('domingo');
   });
 
   test('formats an AM open time correctly', () => {
@@ -92,61 +96,79 @@ describe('formatIntentResponse("horarios", ...)', () => {
   });
 
   test('returns fallback for empty rows', () => {
-    expect(formatIntentResponse('horarios', [])).toMatch(/no encontré|No encontré/i);
+    const result = formatIntentResponse('horarios', []);
+    expect(typeof result).toBe('string');
+    expect(result.length).toBeGreaterThan(10);
   });
 
   test('returns fallback for null input', () => {
-    expect(formatIntentResponse('horarios', null)).toMatch(/no encontré|No encontré/i);
+    const result = formatIntentResponse('horarios', null);
+    expect(typeof result).toBe('string');
+    expect(result.length).toBeGreaterThan(10);
+  });
+
+  test('response is plain text — no bullet points or markdown', () => {
+    const result = formatIntentResponse('horarios', HORARIOS_ROWS);
+    expect(result).not.toContain('•');
+    expect(result).not.toContain('*');
+    expect(result).not.toContain('—');
   });
 });
 
 // ─── productos formatter ──────────────────────────────────────────────────────
 
 describe('formatIntentResponse("productos", ...)', () => {
-  test('includes the header emoji and label', () => {
-    const result = formatIntentResponse('productos', PRODUCTOS_ROWS);
-    expect(result).toContain('📦');
-  });
-
-  test('lists each product name and price', () => {
+  test('lists product names in natural language', () => {
     const result = formatIntentResponse('productos', PRODUCTOS_ROWS);
     expect(result).toContain('Hamburguesa Doble');
-    expect(result).toContain('$150.00');
     expect(result).toContain('Refresco');
-    expect(result).toContain('$25.00');
   });
 
-  test('includes category when present', () => {
+  test('does NOT include stock count (not requested)', () => {
     const result = formatIntentResponse('productos', PRODUCTOS_ROWS);
-    expect(result).toContain('Hamburguesas');
-    expect(result).toContain('Bebidas');
+    expect(result).not.toContain('stock');
+    expect(result).not.toContain('30');
   });
 
-  test('includes stock count when present', () => {
+  test('response has no forbidden emojis or bullet points', () => {
     const result = formatIntentResponse('productos', PRODUCTOS_ROWS);
-    expect(result).toContain('stock: 30');
+    // 😊 is intentionally allowed; use u flag so emoji don’t share surrogate matches
+    expect(result).not.toMatch(/[📦📁✅❌•]/u);
+    expect(result).not.toContain('*');
+    expect(result).not.toContain('—');
   });
 
-  test('skips stock when stock_quantity is null', () => {
-    const rows = [{ name: 'Agua', category: null, price: '20.00', stock_quantity: null }];
+  test('offers to continue with a question', () => {
+    const result = formatIntentResponse('productos', PRODUCTOS_ROWS);
+    expect(result).toMatch(/\?/);
+  });
+
+  test('skips stock when stock_quantity is null (always)', () => {
+    const rows = [{ name: 'Agua', category: null, price: '20.00', is_available: true, stock_quantity: null }];
     const result = formatIntentResponse('productos', rows);
-    expect(result).not.toContain('stock:');
+    expect(result).not.toContain('stock');
+  });
+
+  test('shows max 3 items when many products', () => {
+    const rows = Array.from({ length: 10 }, (_, i) => ({
+      name: `Producto ${i + 1}`, category: 'Cat', price: '10.00', is_available: true, stock_quantity: 5,
+    }));
+    const result = formatIntentResponse('productos', rows);
+    // Should mention "entre otros" for large sets
+    expect(result).toMatch(/entre otros/i);
   });
 
   test('returns fallback for empty rows', () => {
-    expect(formatIntentResponse('productos', [])).toMatch(/no encontré|No encontré/i);
+    const result = formatIntentResponse('productos', []);
+    expect(typeof result).toBe('string');
+    expect(result.length).toBeGreaterThan(10);
   });
 });
 
 // ─── precios formatter ────────────────────────────────────────────────────────
 
 describe('formatIntentResponse("precios", ...)', () => {
-  test('includes the header emoji', () => {
-    const result = formatIntentResponse('precios', PRECIOS_ROWS);
-    expect(result).toContain('💲');
-  });
-
-  test('lists product names and prices', () => {
+  test('lists product names and prices as natural sentence', () => {
     const result = formatIntentResponse('precios', PRECIOS_ROWS);
     expect(result).toContain('Pozole Rojo');
     expect(result).toContain('$110.00');
@@ -154,20 +176,22 @@ describe('formatIntentResponse("precios", ...)', () => {
     expect(result).toContain('$20.00');
   });
 
+  test('response has no forbidden emojis or bullet points', () => {
+    const result = formatIntentResponse('precios', PRECIOS_ROWS);
+    expect(result).not.toMatch(/[💲•]/u);
+    expect(result).not.toContain('*');
+  });
+
   test('returns fallback for empty rows', () => {
-    expect(formatIntentResponse('precios', [])).toMatch(/no encontré|No encontré/i);
+    const result = formatIntentResponse('precios', []);
+    expect(typeof result).toBe('string');
+    expect(result.length).toBeGreaterThan(10);
   });
 });
 
 // ─── promociones formatter ────────────────────────────────────────────────────
 
 describe('formatIntentResponse("promociones", ...)', () => {
-  test('includes the header emoji and label', () => {
-    const result = formatIntentResponse('promociones', PROMOCIONES_ROWS);
-    expect(result).toContain('🎉');
-    expect(result).toContain('Promociones');
-  });
-
   test('shows percentage discount correctly', () => {
     const result = formatIntentResponse('promociones', PROMOCIONES_ROWS);
     expect(result).toContain('50% de descuento');
@@ -189,6 +213,12 @@ describe('formatIntentResponse("promociones", ...)', () => {
     expect(result).toContain('Solo en pastor');
   });
 
+  test('response has no forbidden emojis or bullet points', () => {
+    const result = formatIntentResponse('promociones', PROMOCIONES_ROWS);
+    expect(result).not.toMatch(/[🎉•✅❌]/u);
+    expect(result).not.toContain('*');
+  });
+
   test('returns fallback for empty rows', () => {
     expect(formatIntentResponse('promociones', [])).toMatch(/no hay promociones/i);
   });
@@ -197,9 +227,9 @@ describe('formatIntentResponse("promociones", ...)', () => {
 // ─── ubicacion formatter ──────────────────────────────────────────────────────
 
 describe('formatIntentResponse("ubicacion", ...)', () => {
-  test('includes the header emoji', () => {
+  test('shows city', () => {
     const result = formatIntentResponse('ubicacion', UBICACION_ROW);
-    expect(result).toContain('📍');
+    expect(result).toContain('Ciudad de México');
   });
 
   test('shows business name', () => {
@@ -207,18 +237,21 @@ describe('formatIntentResponse("ubicacion", ...)', () => {
     expect(result).toContain('Restaurante Don Pepe');
   });
 
-  test('shows city', () => {
-    const result = formatIntentResponse('ubicacion', UBICACION_ROW);
-    expect(result).toContain('Ciudad de México');
-  });
-
   test('shows the address/description', () => {
     const result = formatIntentResponse('ubicacion', UBICACION_ROW);
     expect(result).toContain('Insurgentes');
   });
 
+  test('response has no forbidden emojis or bullet points', () => {
+    const result = formatIntentResponse('ubicacion', UBICACION_ROW);
+    expect(result).not.toMatch(/[📍•✅❌]/u);
+    expect(result).not.toContain('*');
+  });
+
   test('returns fallback for null input', () => {
-    expect(formatIntentResponse('ubicacion', null)).toMatch(/no encontré|No encontré/i);
+    const result = formatIntentResponse('ubicacion', null);
+    expect(typeof result).toBe('string');
+    expect(result.length).toBeGreaterThan(10);
   });
 });
 
@@ -231,3 +264,36 @@ describe('formatIntentResponse() — unknown intent', () => {
     expect(result).toContain('unknown_intent');
   });
 });
+
+// ─── Voice optimization checks ───────────────────────────────────────────────
+
+describe('voice optimization — all formatters produce clean text', () => {
+  // 😊 (U+1F60A) is intentionally allowed as a single friendly emoji per response.
+  // All other emoji in the heavy-emoji Unicode blocks are forbidden.
+  const EMOJI_RE = /[\u{1F300}-\u{1FFFF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/u;
+
+  test.each([
+    ['horarios',    HORARIOS_ROWS],
+    ['productos',   PRODUCTOS_ROWS],
+    ['precios',     PRECIOS_ROWS],
+    ['promociones', PROMOCIONES_ROWS],
+    ['ubicacion',   UBICACION_ROW],
+  ])('%s formatter produces no forbidden emojis', (intent, data) => {
+    const result = formatIntentResponse(intent, data);
+    // Strip the one allowed emoji (😊) before asserting
+    const stripped = result.replace(/\u{1F60A}/gu, '');
+    expect(stripped).not.toMatch(EMOJI_RE);
+  });
+
+  test.each([
+    ['horarios',    HORARIOS_ROWS],
+    ['productos',   PRODUCTOS_ROWS],
+    ['precios',     PRECIOS_ROWS],
+    ['promociones', PROMOCIONES_ROWS],
+    ['ubicacion',   UBICACION_ROW],
+  ])('%s formatter has no bullet points', (intent, data) => {
+    const result = formatIntentResponse(intent, data);
+    expect(result).not.toContain('•');
+  });
+});
+

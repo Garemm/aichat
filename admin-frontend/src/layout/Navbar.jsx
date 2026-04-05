@@ -21,8 +21,8 @@ const Navbar = ({ onMenuClick }) => {
   const navigate     = useNavigate();
   const title = TITLES[pathname] ?? 'Admin';
 
-  const handleLogout = () => {
-    signOut();
+  const handleLogout = async () => {
+    await signOut();
     navigate('/login', { replace: true });
   };
 

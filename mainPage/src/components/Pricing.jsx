@@ -8,8 +8,8 @@ const plans = [
   {
     name: 'Básico',
     tagline: 'Para empezar',
-    monthlyPrice: 29,
-    yearlyPrice: 23,
+    monthlyPrice: 499,
+    yearlyPrice: 4990,
     description: 'Todo lo necesario para que tu negocio empiece a atender clientes con el chatbot.',
     features: [
       '1 negocio registrado',
@@ -26,8 +26,8 @@ const plans = [
   {
     name: 'Pro',
     tagline: 'Más popular',
-    monthlyPrice: 69,
-    yearlyPrice: 55,
+    monthlyPrice: 899,
+    yearlyPrice: 8990,
     description: 'Potencia total: IA generativa, voz e importación masiva incluidos.',
     features: [
       'Todo lo del plan Básico',
@@ -172,7 +172,7 @@ function PlanCard({ plan, yearly, index }) {
                 <>
                   <span className="text-xs text-foreground-muted self-start mt-2">$</span>
                   <span className="text-4xl font-bold text-foreground">{price}</span>
-                  <span className="text-foreground-muted text-sm mb-1">/mo</span>
+                  <span className="text-foreground-muted text-sm mb-1">/mensual</span>
                 </>
               ) : (
                 <span className="text-3xl font-bold text-foreground">Custom</span>

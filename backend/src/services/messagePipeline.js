@@ -32,6 +32,7 @@ const { detectIntent, isStandaloneIntent } = require('./intentDetector');
 const { detectEntities, queryProducts, formatProductResponse } = require('./entityDetector');
 const { detectDay } = require('./dayDetector');
 const { getContext, updateContext } = require('./sessionContextService');
+const { logProductQuery } = require('./queryLogService');
 const {
   getBusinessInfoByIntent,
   getHorariosByDay,
@@ -46,7 +47,7 @@ const { getKeywordResponse } = require('../mockai/keywordResponses');
 const { getMockOpenAIResponse, getRAGOpenAIResponse } = require('../temp/mockOpenAI');
 const { shouldUseAI, hasRelevantData } = require('./aiDecisionEngine');
 const { filterRelevantData } = require('./ragFilterService');
-const { searchByAttributes, searchByCompoundQuery, formatAttributeResponse, formatCompoundQueryResponse } = require('./attributeSearchService');
+const { searchByAttributes, searchByCompoundQuery, searchByCategoryAttribute, formatAttributeResponse, formatCompoundQueryResponse, formatCategoryAttributeResponse } = require('./attributeSearchService');
 const { extractAttribute } = require('./attributeExtractor');
 
 /** Minimum score to consider intent as "high confidence" (skip context). */
@@ -123,13 +124,18 @@ function detectCategorySelection(normalizedText, availableCategories) {
 }
 
 /**
- * Formats the "too many results" pivot response that shows available categories.
+ * Formats the "too many results" pivot response that prompts for a category.
  * @param {string[]} categories
  * @returns {string}
  */
 function formatCategoryPrompt(categories) {
-  const catList = formatList('📂 Categorías disponibles:', categories);
-  return `Tenemos muchos productos disponibles 😊 ¿Estás buscando algo en particular?\n\n${catList}\n\nSólo díme la categoría que te interesa.`;
+  if (!categories || categories.length === 0) {
+    return 'Tenemos muchos productos disponibles. ¿Buscas algo en particular?';
+  }
+  const shown  = categories.slice(0, 4);
+  const listed = shown.join(', ');
+  const more   = categories.length > 4 ? ', entre otras' : '';
+  return `Tenemos muchos productos disponibles. Puedes buscar por categoría, como ${listed}${more}. ¿Cuál te interesa?`;
 }
 
 /**
@@ -141,18 +147,22 @@ function formatCategoryPrompt(categories) {
  * @returns {string}
  */
 function formatProductPage(rows, offset, total, category) {
-  const end = offset + rows.length;
-  const header = `📦 ${category} (${offset + 1}–${end} de ${total}):`;
-  const items = rows.map((r) => {
-    const stock = r.stock_quantity != null ? ` · stock: ${r.stock_quantity}` : '';
-    const avail = r.is_available !== false ? '✅' : '❌';
-    return `${avail} ${r.name} — $${Number(r.price).toFixed(2)}${stock}`;
-  });
-  const base = formatList(header, items);
+  const end       = offset + rows.length;
+  const remaining = total - end;
+  const items     = rows.map((r) =>
+    r.is_available !== false
+      ? `${r.name} a $${Number(r.price).toFixed(2)}`
+      : `${r.name} (no disponible)`
+  );
+  // natural comma list
+  const listed = items.length > 1
+    ? `${items.slice(0, -1).join(', ')} y ${items[items.length - 1]}`
+    : items[0];
+  const base = `😊 Aquí tienes productos de ${category}: ${listed}.`;
   if (end < total) {
-    return `${base}\n\nEscribe *"ver más"* para continuar viendo los siguientes productos.`;
+    return `${base} Hay ${remaining} más. Escribe "ver más" para continuar.`;
   }
-  return `${base}\n\n✅ ¡Eso es todo en esta categoría!`;
+  return `${base} Eso es todo en esta categoría.`;
 }
 
 // ─── Ambiguity detection ──────────────────────────────────────────────────────
@@ -406,6 +416,7 @@ function decide(intentResult, entityResult, context, normalizedText) {
         // Compound query fields (present only for "entity de attribute" patterns)
         entityTerm: entityResult.entityTerm ?? null,
         attributeTerm: entityResult.attributeTerm ?? null,
+        categoryTerm: entityResult.categoryTerm ?? null,
       },
       usedContext: false,
       reason: `attribute detected: "${entityResult.value}" (${entityResult.attributeType})`,
@@ -696,6 +707,13 @@ async function executeDecision(decision, originalText, businessId, context, sess
   // ── Attribute search: "algo con X", "para madera", "que tenga wifi" ──────────
   if (decision.strategy === 'attribute') {
     try {
+      // Category+attribute path: "alguna bebida con chocolate", "algun postre de arroz"
+      if (decision.entity.categoryTerm) {
+        const catAttr = { categoryWord: decision.entity.categoryTerm, attribute: decision.entity.attributeTerm };
+        const { rows, strategy } = await searchByCategoryAttribute(catAttr, businessId);
+        return formatCategoryAttributeResponse(catAttr, rows, strategy);
+      }
+
       // Compound query path: "tornillos de madera", "carne de res", etc.
       // Uses strict 3-layer search to prevent false positives.
       if (decision.entity.entityTerm) {
@@ -750,10 +768,10 @@ async function executeDecision(decision, originalText, businessId, context, sess
     try {
       const rows = await queryProducts(decision.entity.value, businessId);
       if (rows.length === 0) {
-        return `Mmm, no encontré el producto "*${decision.entity.value}*" en nuestro catálogo. ¿Te gustaría ver los productos disponibles?`;
+        return `No encontré "${decision.entity.value}" en nuestro catálogo. ¿Quieres ver las opciones disponibles?`;
       }
       const p = rows[0];
-      let response = `El producto *${p.name}* cuesta $${Number(p.price).toFixed(2)}.`;
+      let response = `😊 ${p.name} tiene un precio de $${Number(p.price).toFixed(2)}.`;
       try {
         const attrsMap = await getProductAttributes([p.id]);
         response += formatProductAttributes(attrsMap, p.id);
@@ -813,6 +831,11 @@ async function executeDecision(decision, originalText, businessId, context, sess
     if (decision.entity.type === 'product') {
       try {
         const rows = await queryProducts(decision.entity.value, businessId);
+        // Log queried products for analytics (fire-and-forget)
+        const available = rows.filter((r) => r.is_available !== false);
+        if (available.length > 0) {
+          logProductQuery(businessId, available.map((r) => r.id));
+        }
         let response = formatProductResponse(decision.entity.value, rows);
         if (rows.length === 1) {
           try {
@@ -853,10 +876,13 @@ async function executeDecision(decision, originalText, businessId, context, sess
         try {
           const services = await getBusinessInfoByIntent('servicios', businessId);
           if (services && services.length > 0) {
-            const svcList = services.map((s) => `• ${s.name}`).join('\n');
+            const svcNames = services.map((s) => s.name).slice(0, 3);
+            const svcListed = svcNames.length > 1
+              ? `${svcNames.slice(0, -1).join(', ')} y ${svcNames[svcNames.length - 1]}`
+              : svcNames[0];
+            const more = services.length > 3 ? ', entre otros' : '';
             intentResponse +=
-              `\n\n🛎️ También ofrecemos los siguientes servicios:\n${svcList}` +
-              '\n\n¿Te gustaría saber más sobre alguno?';
+              ` También ofrecemos ${svcListed}${more}. ¿Te gustaría saber más sobre alguno?`;
           }
         } catch { /* services are optional */ }
       }

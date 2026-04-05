@@ -167,6 +167,11 @@ export const getHours    = ()     => request(`${BASE}/hours`);
 export const saveHour    = (data) => request(`${BASE}/hours`,      { method: 'POST', body: JSON.stringify(data) });
 export const saveAllHours = (days) => request(`${BASE}/hours/bulk`, { method: 'POST', body: JSON.stringify({ days }) });
 
+// ── Analytics ─────────────────────────────────────────────────────────────────
+export const getTopProducts = (businessId) =>
+  request(`${BASE}/analytics/top-products/${businessId}`)
+    .then((res) => res.data ?? res);
+
 // ── Bulk Import ───────────────────────────────────────────────────────────────
 export const importPreview = (file) => {
   const form = new FormData();

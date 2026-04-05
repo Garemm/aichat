@@ -321,10 +321,125 @@ async function searchByCompoundQuery({ entity, attribute, fullPhrase }, business
   }
 }
 
+// ─── Category + attribute query ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * Searches products filtered by category name AND a term present in the
+ * product’s name / description / product_attributes.
+ *
+ * Used for queries like:
+ *   "alguna bebida con chocolate"  → category=bebida, attribute=chocolate
+ *   "algun postre de arroz"        → category=postre,  attribute=arroz
+ *
+ * Strategy:
+ *   Layer 1 — category name matches AND attribute term present in product
+ *   Layer 2 — attribute-only fallback (when category name doesn’t match any row)
+ *
+ * @param {{ categoryWord: string, attribute: string }} query
+ * @param {number} businessId
+ * @returns {Promise<{ rows: Array, strategy: string }>}
+ */
+async function searchByCategoryAttribute({ categoryWord, attribute }, businessId) {
+  const catVariants  = wordVariants(categoryWord);
+  const catParts     = [];
+  const catParams    = [];
+  let   catIdx       = 2;
+
+  for (const v of catVariants) {
+    catParts.push(`c.name ILIKE $${catIdx}`);
+    catParams.push(`%${v}%`);
+    catIdx += 1;
+  }
+  const catClause = catParts.join(' OR ');
+
+  // Attribute conditions start after all category params
+  const attrResult = buildTermClause(attribute, catIdx);
+
+  // Layer 1: products whose category matches AND contain the attribute
+  {
+    const params = [businessId, ...catParams, ...attrResult.params];
+    const result = await db.query(
+      `${PRODUCT_SELECT} WHERE p.business_id = $1 ` +
+      `AND (${catClause}) AND ${attrResult.clause} ` +
+      `ORDER BY p.name ASC LIMIT ${ATTR_SEARCH_LIMIT}`,
+      params
+    );
+    if (result.rows.length > 0) return { rows: result.rows, strategy: 'category+attribute' };
+  }
+
+  // Layer 2: attribute-only fallback (category name didn’t match in DB)
+  {
+    const ac     = buildTermClause(attribute, 2);
+    const params = [businessId, ...ac.params];
+    const result = await db.query(
+      `${PRODUCT_SELECT} WHERE p.business_id = $1 AND ${ac.clause} ` +
+      `ORDER BY p.name ASC LIMIT ${ATTR_SEARCH_LIMIT}`,
+      params
+    );
+    return { rows: result.rows, strategy: 'attribute-only' };
+  }
+}
+
+/**
+ * Formats category+attribute search results into natural, voice-friendly Spanish.
+ *
+ * @param {{ categoryWord: string, attribute: string }} query
+ * @param {Array}  rows
+ * @param {string} strategy
+ * @returns {string}
+ */
+function formatCategoryAttributeResponse(query, rows, strategy) {
+  const catLabel  = query.categoryWord;
+  const attrLabel = query.attribute;
+  const label     = `${catLabel} con ${attrLabel}`;
+
+  if (!rows || rows.length === 0) {
+    return `Lo siento, no encontré productos de ${label}. ¿Quieres ver el catálogo completo o buscar algo diferente?`;
+  }
+
+  const fallbackNote =
+    strategy === 'attribute-only'
+      ? ` No encontré una categoría "${catLabel}" exactamente, pero te muestro opciones con "${attrLabel}".`
+      : '';
+
+  const items   = _buildVoiceList(rows);
+  const hasMore = rows.length > VOICE_PREVIEW;
+  const listed  = _enumList(items);
+
+  if (rows.length === 1) {
+    return `Sí 😊, tenemos ${listed}.${fallbackNote} ¿Te interesa o buscas algo más?`;
+  }
+  if (hasMore) {
+    return `Sí 😊, tenemos varias opciones de ${label}, como ${listed}, entre otras.${fallbackNote} ¿Buscas algo en específico?`;
+  }
+  return `Sí 😊, tenemos varias opciones de ${label}: ${listed}.${fallbackNote} ¿Cuál te interesa?`;
+}
+
+// ─── Voice-friendly response helpers ─────────────────────────────────────────
+
+/** Max products to name in a conversational list (voice-optimized). */
+const VOICE_PREVIEW = 3;
+
+/** "A, B y C" natural enumeration. */
+function _enumList(items) {
+  if (items.length === 0) return '';
+  if (items.length === 1) return items[0];
+  return `${items.slice(0, -1).join(', ')} y ${items[items.length - 1]}`;
+}
+
+/** Returns the first VOICE_PREVIEW products as "Name a $X" strings. */
+function _buildVoiceList(rows) {
+  return rows.slice(0, VOICE_PREVIEW).map((p) =>
+    p.is_available !== false
+      ? `${p.name} a $${Number(p.price).toFixed(2)}`
+      : `${p.name} (no disponible)`
+  );
+}
+
 // ─── Compound query response formatter ───────────────────────────────────────
 
 /**
- * Formats compound query search results into a human-readable Spanish response.
+ * Formats compound query search results into a natural, voice-friendly Spanish response.
  *
  * @param {{ entity: string, attribute: string, fullPhrase: string }} compound
  * @param {Array}  rows
@@ -332,61 +447,36 @@ async function searchByCompoundQuery({ entity, attribute, fullPhrase }, business
  * @returns {string}
  */
 function formatCompoundQueryResponse(compound, rows, strategy) {
-  const label = `"${compound.fullPhrase}"`;
+  const label = compound.fullPhrase;
 
   if (!rows || rows.length === 0) {
-    return (
-      `Lo siento, no encontré productos relacionados con ${label}. ` +
-      `¿Quieres ver el catálogo completo o buscar algo diferente?`
-    );
+    return `Lo siento, no encontré productos relacionados con "${label}". ¿Quieres ver el catálogo completo o buscar algo diferente?`;
   }
 
   const fallbackNote =
     strategy === 'entity-only'
-      ? `\n_(No encontré resultados para ${label} exactamente. Te muestro productos relacionados con "${compound.entity}".)_`
+      ? ` No encontré "${compound.fullPhrase}" exactamente, pero aquí tienes opciones de "${compound.entity}".`
       : strategy === 'attribute-only'
-      ? `\n_(No encontré productos que mencionen específicamente "${compound.entity}". Te muestro productos relacionados con "${compound.attribute}".)_`
+      ? ` No encontré "${compound.entity}" específicamente, pero te muestro opciones con "${compound.attribute}".`
       : '';
 
+  const items   = _buildVoiceList(rows);
+  const hasMore = rows.length > VOICE_PREVIEW;
+  const listed  = _enumList(items);
+
   if (rows.length === 1) {
-    const p = rows[0];
-    const status = p.is_available ? '✅ Disponible' : '❌ No disponible';
-    const stock  = p.stock_quantity != null ? `\n  📦 Stock: ${p.stock_quantity} uds.` : '';
-    const cat    = p.category ? `\n  🏷️ Categoría: ${p.category}` : '';
-    const desc   = p.description ? `\n  📝 ${p.description}` : '';
-    return (
-      `🔍 Encontré un producto con ${label}:\n\n` +
-      `*${p.name}*\n` +
-      `  💲 $${Number(p.price).toFixed(2)}\n` +
-      `  ${status}` +
-      stock + cat + desc +
-      fallbackNote
-    );
+    return `Sí 😊, tenemos ${listed}.${fallbackNote} ¿Te interesa o buscas algo más?`;
   }
-
-  const tooMany = rows.length >= ATTR_SEARCH_LIMIT;
-  const lines = rows.map((p) => {
-    const status = p.is_available ? '✅' : '❌';
-    const stock  = p.stock_quantity != null ? ` · stock: ${p.stock_quantity}` : '';
-    const cat    = p.category ? ` [${p.category}]` : '';
-    return `  • ${status} *${p.name}*${cat} — $${Number(p.price).toFixed(2)}${stock}`;
-  });
-
-  const header = tooMany
-    ? `🔍 Encontré muchos productos con ${label} (mostrando los primeros ${ATTR_SEARCH_LIMIT}):`
-    : `🔍 Encontré *${rows.length} producto${rows.length > 1 ? 's' : ''}* con ${label}:`;
-
-  const footer = tooMany
-    ? `\n\n¿Quieres filtrar más? Por ejemplo: "${compound.fullPhrase} y [otro criterio]"`
-    : '';
-
-  return `${header}\n\n${lines.join('\n')}${footer}${fallbackNote}`;
+  if (hasMore) {
+    return `Sí 😊, tenemos varias opciones con ${label}, como ${listed}, entre otras.${fallbackNote} Si buscas algo en específico, dime y te ayudo.`;
+  }
+  return `Sí 😊, tenemos varias opciones con ${label}: ${listed}.${fallbackNote} ¿Cuál te interesa?`;
 }
 
 // ─── Response formatter ───────────────────────────────────────────────────────
 
 /**
- * Formats attribute search results into a human-readable Spanish response.
+ * Formats attribute search results into a natural, voice-friendly Spanish response.
  *
  * @param {Array<{ value: string }>} attributes
  * @param {Array}  rows
@@ -394,62 +484,38 @@ function formatCompoundQueryResponse(compound, rows, strategy) {
  * @returns {string}
  */
 function formatAttributeResponse(attributes, rows, strategy = 'AND') {
-  const label = attributes.map((a) => `"${a.value}"`).join(' y ');
+  const label = _enumList(attributes.map((a) => a.value));
 
   if (!rows || rows.length === 0) {
-    return (
-      `Lo siento, no encontré productos relacionados con ${label}. ` +
-      `¿Quieres ver el catálogo completo o buscar algo diferente?`
-    );
+    return `Lo siento, no encontré productos relacionados con ${label}. ¿Quieres ver el catálogo completo o buscar algo diferente?`;
   }
 
   const strategyNote =
     strategy === 'OR' && attributes.length > 1
-      ? `\n_(No encontré productos con todos los criterios juntos. Te muestro los que coinciden con al menos uno.)_`
+      ? ` Algunos no tienen todos los criterios, pero son las opciones más cercanas.`
       : '';
 
+  const items   = _buildVoiceList(rows);
+  const hasMore = rows.length > VOICE_PREVIEW;
+  const listed  = _enumList(items);
+
   if (rows.length === 1) {
-    const p = rows[0];
-    const status = p.is_available ? '✅ Disponible' : '❌ No disponible';
-    const stock  = p.stock_quantity != null ? `\n  📦 Stock: ${p.stock_quantity} uds.` : '';
-    const cat    = p.category ? `\n  🏷️ Categoría: ${p.category}` : '';
-    const desc   = p.description ? `\n  📝 ${p.description}` : '';
-    return (
-      `🔍 Encontré un producto con ${label}:\n\n` +
-      `*${p.name}*\n` +
-      `  💲 $${Number(p.price).toFixed(2)}\n` +
-      `  ${status}` +
-      stock + cat + desc +
-      strategyNote
-    );
+    return `Sí 😊, tenemos ${listed}.${strategyNote} ¿Quieres saber algo más?`;
   }
-
-  const tooMany = rows.length >= ATTR_SEARCH_LIMIT;
-
-  const lines = rows.map((p) => {
-    const status = p.is_available ? '✅' : '❌';
-    const stock  = p.stock_quantity != null ? ` · stock: ${p.stock_quantity}` : '';
-    const cat    = p.category ? ` [${p.category}]` : '';
-    return `  • ${status} *${p.name}*${cat} — $${Number(p.price).toFixed(2)}${stock}`;
-  });
-
-  const header = tooMany
-    ? `🔍 Encontré muchos productos con ${label} (mostrando los primeros ${ATTR_SEARCH_LIMIT}):`
-    : `🔍 Encontré *${rows.length} producto${rows.length > 1 ? 's' : ''}* con ${label}:`;
-
-  const footer = tooMany
-    ? `\n\n¿Quieres filtrar más? Por ejemplo: "productos con ${attributes[0].value} y [otro atributo]"`
-    : '';
-
-  return `${header}\n\n${lines.join('\n')}${footer}${strategyNote}`;
+  if (hasMore) {
+    return `Sí 😊, tenemos varias opciones con ${label}, como ${listed}, entre otras.${strategyNote} ¿Buscas algo en específico?`;
+  }
+  return `Sí 😊, tenemos ${rows.length} opciones con ${label}: ${listed}.${strategyNote} ¿Cuál te interesa?`;
 }
 
 module.exports = {
   searchByAttribute,
   searchByAttributes,
   searchByCompoundQuery,
+  searchByCategoryAttribute,
   formatAttributeResponse,
   formatCompoundQueryResponse,
+  formatCategoryAttributeResponse,
   buildAttributeConditions,
   ATTR_SEARCH_LIMIT,
 };

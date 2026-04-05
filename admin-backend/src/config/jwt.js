@@ -13,8 +13,8 @@ if (!ACCESS_SECRET || !REFRESH_SECRET) {
   process.exit(1);
 }
 
-const ACCESS_TTL  = '15m';   // access token vive 15 minutos
-const REFRESH_TTL = '7d';    // refresh token vive 7 días
+const ACCESS_TTL  = '9m';   // access token vive 9 minutos
+const REFRESH_TTL = '1d';    // refresh token vive 1 día obligando al usuario a iniciar sesión
 
 /**
  * Firma un access token JWT de corta duración.

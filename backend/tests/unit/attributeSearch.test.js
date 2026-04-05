@@ -49,6 +49,7 @@ const db = require('../../src/config/database');
 const {
   extractAttribute,
   extractCompoundQuery,
+  extractCategoryAttributeQuery,
   isAttributeQuery,
   classifyAttributeType,
   isMeasure,
@@ -58,8 +59,10 @@ const {
   searchByAttribute,
   searchByAttributes,
   searchByCompoundQuery,
+  searchByCategoryAttribute,
   formatAttributeResponse,
   formatCompoundQueryResponse,
+  formatCategoryAttributeResponse,
   buildAttributeConditions,
 } = require('../../src/services/attributeSearchService');
 
@@ -278,7 +281,7 @@ describe('attributeSearchService — formatAttributeResponse()', () => {
       { id: 2, name: 'Hamburguesa queso', price: 12, is_available: true, stock_quantity: null, category: null },
     ];
     const msg = formatAttributeResponse(attrs, rows, 'AND');
-    expect(msg).toMatch(/2 productos/i);
+    expect(msg).toMatch(/2 opciones/i);
   });
 
   test('includes OR note when strategy is OR', () => {
@@ -288,7 +291,7 @@ describe('attributeSearchService — formatAttributeResponse()', () => {
       rows,
       'OR'
     );
-    expect(msg).toMatch(/al menos uno/i);
+    expect(msg).toMatch(/criterios|cercanas/i);
   });
 });
 
@@ -813,5 +816,148 @@ describe('attributeSearchService — word-boundary matching safety', () => {
     expect(layer1Sql).toMatch(/product_attributes/);
     const layer1Params = db.query.mock.calls[0][1];
     expect(layer1Params.some((p) => p === '%carne de res%')).toBe(true);
+  });
+});
+
+// ─── attributeExtractor — extractCategoryAttributeQuery ──────────────────────
+
+describe('attributeExtractor — extractCategoryAttributeQuery()', () => {
+  describe('positive matches', () => {
+    test.each([
+      ['tiene alguna bebida con chocolate',  { categoryWord: 'bebida',  attribute: 'chocolate' }],
+      ['hay alguna bebida de chocolate',     { categoryWord: 'bebida',  attribute: 'chocolate' }],
+      ['algun postre de arroz',              { categoryWord: 'postre',  attribute: 'arroz'     }],
+      ['tiene algun postre con crema',       { categoryWord: 'postre',  attribute: 'crema'     }],
+      ['alguna bebida fria con menta',       { categoryWord: 'bebida fria', attribute: 'menta' }],
+    ])('%s', (msg, expected) => {
+      expect(extractCategoryAttributeQuery(msg)).toMatchObject(expected);
+    });
+  });
+
+  describe('returns null for non-matching inputs', () => {
+    test.each([
+      ['tienes una hamburguesa'],
+      ['que bebidas tienen'],
+      ['quiero una pizza con queso'],  // no "algun*"
+      ['alguna bebida con litros'],    // "litros" is a measure
+    ])('%s', (msg) => {
+      expect(extractCategoryAttributeQuery(msg)).toBeNull();
+    });
+  });
+});
+
+// ─── attributeSearchService — searchByCategoryAttribute ──────────────────────
+
+describe('attributeSearchService — searchByCategoryAttribute()', () => {
+  const maltRow = [{ id: 10, name: 'Malteada de chocolate', price: 4.5, is_available: true, stock_quantity: 3, category: 'Bebidas' }];
+
+  test('Layer 1 hit: returns rows with strategy "category+attribute"', async () => {
+    db.query.mockResolvedValueOnce({ rows: maltRow });
+
+    const { rows, strategy } = await searchByCategoryAttribute(
+      { categoryWord: 'bebida', attribute: 'chocolate' }, 1
+    );
+    expect(rows).toEqual(maltRow);
+    expect(strategy).toBe('category+attribute');
+    expect(db.query).toHaveBeenCalledTimes(1);
+    const sql = db.query.mock.calls[0][0];
+    expect(sql).toMatch(/c\.name ILIKE/);
+  });
+
+  test('Layer 2 fallback: category not matched, falls back to attribute-only', async () => {
+    db.query.mockResolvedValueOnce({ rows: [] }); // Layer 1 miss
+    db.query.mockResolvedValueOnce({ rows: maltRow }); // Layer 2 hit
+
+    const { rows, strategy } = await searchByCategoryAttribute(
+      { categoryWord: 'bebida', attribute: 'chocolate' }, 1
+    );
+    expect(rows).toEqual(maltRow);
+    expect(strategy).toBe('attribute-only');
+    expect(db.query).toHaveBeenCalledTimes(2);
+  });
+
+  test('no results: both layers empty → returns empty rows with "attribute-only"', async () => {
+    db.query.mockResolvedValue({ rows: [] });
+
+    const { rows, strategy } = await searchByCategoryAttribute(
+      { categoryWord: 'bebida', attribute: 'chocolate' }, 1
+    );
+    expect(rows).toEqual([]);
+    expect(strategy).toBe('attribute-only');
+  });
+});
+
+// ─── formatCategoryAttributeResponse ─────────────────────────────────────────
+
+describe('formatCategoryAttributeResponse()', () => {
+  const query = { categoryWord: 'bebida', attribute: 'chocolate' };
+
+  test('empty rows → not-found message', () => {
+    const msg = formatCategoryAttributeResponse(query, [], 'attribute-only');
+    expect(msg).toMatch(/no encontr/i);
+    expect(msg).toMatch(/bebida/);
+  });
+
+  test('single result → shows product name and price', () => {
+    const rows = [{ id: 1, name: 'Malteada de chocolate', price: 4.5, is_available: true, stock_quantity: null, category: 'Bebidas', description: null }];
+    const msg = formatCategoryAttributeResponse(query, rows, 'category+attribute');
+    expect(msg).toMatch(/Malteada de chocolate/);
+    expect(msg).toMatch(/4\.50/);
+    expect(msg).not.toMatch(/fallback/i);
+  });
+
+  test('multiple results → lists products with natural language', () => {
+    const rows = [
+      { id: 1, name: 'Malteada de chocolate', price: 4.5, is_available: true, stock_quantity: null, category: 'Bebidas', description: null },
+      { id: 2, name: 'Batido de chocolate',   price: 3.0, is_available: true, stock_quantity: null, category: 'Bebidas', description: null },
+    ];
+    const msg = formatCategoryAttributeResponse(query, rows, 'category+attribute');
+    expect(msg).toMatch(/Malteada de chocolate/);
+    expect(msg).toMatch(/Batido de chocolate/);
+    expect(msg).not.toMatch(/•/);
+  });
+
+  test('fallback note shown when strategy is "attribute-only"', () => {
+    const rows = [{ id: 1, name: 'Hot chocolate', price: 2.0, is_available: true, stock_quantity: null, category: 'Otras', description: null }];
+    const msg = formatCategoryAttributeResponse(query, rows, 'attribute-only');
+    expect(msg).toMatch(/bebida/);
+  });
+});
+
+// ─── Pipeline integration: category+attribute routing ────────────────────────
+
+describe('processMessage() — category+attribute strategy', () => {
+  const BID = 7;
+  const maltRows = [
+    { id: 10, name: 'Malteada de chocolate', price: 4.5, is_available: true, stock_quantity: 5, category: 'Bebidas', description: 'Rica malteada' },
+  ];
+
+  test('"tiene alguna bebida con chocolate" routes to searchByCategoryAttribute', async () => {
+    // Layer 1 hit: category=bebida + attribute=chocolate → returns maltRows
+    db.query.mockResolvedValueOnce({ rows: maltRows });
+
+    const result = await processMessage({
+      text: 'tiene alguna bebida con chocolate',
+      sessionId: 'sess-cat1',
+      businessId: BID,
+    });
+
+    expect(result.replyText).toMatch(/Malteada de chocolate/);
+    expect(result.replyText).toMatch(/4\.50/);
+    expect(result.decision.strategy).toBe('attribute');
+  });
+
+  test('"tiene algun postre de arroz" routes to category+attribute search', async () => {
+    const arrozRows = [{ id: 11, name: 'Arroz con leche', price: 3.0, is_available: true, stock_quantity: 2, category: 'Postres', description: null }];
+    db.query.mockResolvedValueOnce({ rows: arrozRows });
+
+    const result = await processMessage({
+      text: 'tiene algun postre de arroz',
+      sessionId: 'sess-cat2',
+      businessId: BID,
+    });
+
+    expect(result.replyText).toMatch(/Arroz con leche/);
+    expect(result.decision.strategy).toBe('attribute');
   });
 });

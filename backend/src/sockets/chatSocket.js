@@ -81,6 +81,7 @@ function resetIdleTimer(sessionId, roomId, businessId) {
       // Persist re-engagement message to Redis history
       await redisSaveMessage(businessId, sessionId, {
         id:        botMsg.id,
+        role:      'assistant',
         sender:    'Bot',
         text:      replyText,
         timestamp: botTimestamp,
@@ -152,6 +153,7 @@ const initSocket = (httpServer) => {
           if (sessionId && businessId) {
             await redisSaveMessage(businessId, sessionId, {
               id:        welcomeMsg.id,
+              role:      'assistant',
               sender:    welcomeMsg.sender,
               text:      welcomeMsg.text,
               timestamp: welcomeMsg.timestamp,
@@ -195,6 +197,7 @@ const initSocket = (httpServer) => {
         // 2. Persist user message to Redis history (include id for React key)
         await redisSaveMessage(businessId, sessionId, {
           id:        message.id,
+          role:      'user',
           sender,
           text,
           timestamp: userTimestamp,
@@ -222,6 +225,7 @@ const initSocket = (httpServer) => {
         // 5. Persist bot response to Redis history (include id for React key)
         await redisSaveMessage(businessId, sessionId, {
           id:        botMsg.id,
+          role:      'assistant',
           sender:    'Bot',
           text:      replyText,
           timestamp: botTimestamp,

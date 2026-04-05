@@ -11,6 +11,7 @@ const importController    = require('../controllers/importController');
 const serviceController   = require('../controllers/serviceController');
 const promotionController = require('../controllers/promotionController');
 const hoursController     = require('../controllers/hoursController');
+const analyticsController = require('../controllers/analyticsController');
 
 // ── Auth (public) ─────────────────────────────────────────────────────────────
 router.post('/login',           authController.login);
@@ -68,5 +69,8 @@ router.get('/hours',        hoursController.list);
 router.post('/hours/bulk',  hoursController.bulkSave);
 router.post('/hours',       hoursController.upsertOne);
 router.delete('/hours/:id', hoursController.remove);
+
+// ── Analytics ─────────────────────────────────────────────────────────────────
+router.get('/analytics/top-products/:business_id', analyticsController.getTopProducts);
 
 module.exports = router;

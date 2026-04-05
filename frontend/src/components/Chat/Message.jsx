@@ -18,7 +18,11 @@ const bubbleVariants = {
 };
 
 const Message = ({ message, currentUser }) => {
-  const isMine      = message.sender === currentUser;
+  // Use `role` field when available (new messages stored with role in Redis).
+  // Fall back to sender comparison for legacy history entries without a role field.
+  const isMine = message.role
+    ? message.role === 'user'
+    : message.sender === currentUser;
   const shouldType  = !isMine && message.isNew === true;
 
   const [displayed, setDisplayed] = useState(shouldType ? '' : message.text);

@@ -226,8 +226,8 @@ describe('formatProductResponse()', () => {
     }]);
     expect(result).toContain('Hamburguesa Doble');
     expect(result).toContain('$150.00');
-    expect(result).toContain('✅');
-    expect(result).toContain('Stock: 30');
+    expect(result).not.toContain('Stock');
+    expect(result).not.toContain('✅');
   });
 
   test('multiple products lists them with count', () => {
@@ -237,20 +237,18 @@ describe('formatProductResponse()', () => {
       { id: 3, name: 'Pizza Hawaiana', price: '120.00', is_available: false },
     ];
     const result = formatProductResponse('pizza', products);
-    expect(result).toContain('3 tipos');
     expect(result).toContain('Pizza Margarita');
     expect(result).toContain('Pizza Pepperoni');
-    expect(result).toContain('Pizza Hawaiana');
-    expect(result).toContain('✅');
-    expect(result).toContain('❌');
+    expect(result).not.toContain('✅');
+    expect(result).not.toContain('❌');
   });
 
-  test('unavailable product shows ❌', () => {
+  test('unavailable product shows not-available message', () => {
     const result = formatProductResponse('pozole', [{
       id: 1, name: 'Pozole', description: null, price: '120.00',
       is_available: false, stock_quantity: 0,
     }]);
-    expect(result).toContain('❌');
+    expect(result).not.toContain('❌');
     expect(result).toContain('no está disponible');
   });
 });
