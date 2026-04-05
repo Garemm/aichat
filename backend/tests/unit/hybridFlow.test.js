@@ -17,12 +17,16 @@
  */
 
 // ─── Mock ioredis antes de cualquier require ─────────────────────────────────
-const store = new Map();
+const store     = new Map();
+const listStore = new Map();
 
 const mockRedisInstance = {
-  get:   jest.fn(async (key)            => store.get(key) ?? null),
-  setex: jest.fn(async (key, _ttl, val) => { store.set(key, val); return 'OK'; }),
-  on:    jest.fn(),
+  get:    jest.fn(async (key)            => store.get(key) ?? null),
+  setex:  jest.fn(async (key, _ttl, val) => { store.set(key, val); return 'OK'; }),
+  rpush:  jest.fn(async (key, val)       => { const l = listStore.get(key) || []; l.push(val); listStore.set(key, l); return l.length; }),
+  lrange: jest.fn(async (key, s, e)      => { const l = listStore.get(key) || []; return e === -1 ? l.slice(s) : l.slice(s, e + 1); }),
+  expire: jest.fn(async ()               => 1),
+  on:     jest.fn(),
 };
 
 jest.mock('ioredis', () => jest.fn().mockImplementation(() => mockRedisInstance));

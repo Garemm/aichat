@@ -2,19 +2,22 @@
  * services/socketService.js — Singleton socket.io-client + gestión de sessionId.
  *
  * MANEJO DE SESIÓN ANÓNIMA:
- *   No hay autenticación. Cada pestaña del navegador genera un sessionId único
- *   (crypto.randomUUID, API nativa del navegador) que se guarda en sessionStorage.
- *   sessionStorage tiene alcance de pestaña: se limpia al cerrar la pestaña,
- *   lo que garantiza sesiones separadas por contexto de conversación.
+ *   No hay autenticación. Cada usuario genera un sessionId único
+ *   (crypto.getRandomValues, compatible con HTTP y HTTPS) que se guarda en
+ *   localStorage para persistir durante 24 horas — alineado con el TTL de
+ *   hist:<businessId>:<sessionId> en Redis.
  *
- *   El sessionId se envía en el payload de cada 'send_message' para que el
- *   backend pueda recuperar el contexto conversacional de Redis.
- *   El frontend NO almacena contexto del negocio — esa lógica vive en el backend.
+ *   El sessionId se envía en join_room y en cada send_message para que el
+ *   backend pueda:
+ *     - Cargar el historial de mensajes de Redis al reconectar (join_room)
+ *     - Recuperar el contexto NLP de Redis (send_message)
  *
- * POR QUÉ sessionStorage Y NO localStorage:
- *   localStorage persiste entre pestañas y sesiones del navegador.
- *   sessionStorage garantiza sesiones independientes por pestaña,
- *   alineado con el TTL de 3.5 min en Redis.
+ *   Colisiones imposibles: dos usuarios con el mismo nombre tienen UUIDs distintos.
+ *
+ * POR QUÉ localStorage Y NO sessionStorage:
+ *   sessionStorage se limpia al cerrar la pestaña.
+ *   localStorage persiste 24 h (alineado con el TTL de historial en Redis),
+ *   permitiendo al usuario recargar la página y ver sus mensajes anteriores.
  */
 
 import { io } from 'socket.io-client';
@@ -22,11 +25,9 @@ import { io } from 'socket.io-client';
 let socket = null;
 
 /**
- * UUID v4 generator that works in ALL browser contexts, including
- * non-secure origins (HTTP over LAN). crypto.randomUUID() is restricted
- * to secure contexts (HTTPS/localhost) and throws on iPhone when the app
- * is accessed via a local IP over plain HTTP. crypto.getRandomValues() has
- * no such restriction and is available everywhere.
+ * UUID v4 generator compatible with ALL browser contexts (HTTP + HTTPS).
+ * crypto.randomUUID() is restricted to secure contexts only (throws on iPhone
+ * over plain HTTP). crypto.getRandomValues() has no such restriction.
  */
 function generateUUID() {
   const buf = new Uint8Array(16);
@@ -37,17 +38,20 @@ function generateUUID() {
   return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;
 }
 
+const STORAGE_KEY = 'chat_session_id';
+
 const socketService = {
   /**
-   * Obtiene o genera el sessionId para la pestaña actual.
-   * Se crea una sola vez con crypto.randomUUID() y se guarda en sessionStorage.
+   * Returns the user's persistent sessionId.
+   * Created once with a UUID v4 and stored in localStorage.
+   * Persists across page reloads for up to 24 h (matching Redis hist TTL).
    * @returns {string} UUID v4
    */
   getSessionId() {
-    let sessionId = sessionStorage.getItem('chat_session_id');
+    let sessionId = localStorage.getItem(STORAGE_KEY);
     if (!sessionId) {
       sessionId = generateUUID();
-      sessionStorage.setItem('chat_session_id', sessionId);
+      localStorage.setItem(STORAGE_KEY, sessionId);
     }
     return sessionId;
   },

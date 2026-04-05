@@ -15,11 +15,15 @@
  */
 
 // ─── Mock de ioredis ─────────────────────────────────────────────────────────
-const store = new Map();
+const store     = new Map();
+const listStore = new Map();
 
 const mockRedisInstance = {
   get:    jest.fn(async (key)             => store.get(key) ?? null),
   setex:  jest.fn(async (key, _ttl, val)  => { store.set(key, val); return 'OK'; }),
+  rpush:  jest.fn(async (key, val)        => { const l = listStore.get(key) || []; l.push(val); listStore.set(key, l); return l.length; }),
+  lrange: jest.fn(async (key, s, e)       => { const l = listStore.get(key) || []; return e === -1 ? l.slice(s) : l.slice(s, e + 1); }),
+  expire: jest.fn(async ()                => 1),
   on:     jest.fn(),
 };
 
@@ -40,6 +44,7 @@ const sid = (label) => `test-session-${label}-${Date.now()}`;
 
 beforeEach(() => {
   store.clear();
+  listStore.clear();
   jest.clearAllMocks();
 });
 
@@ -56,15 +61,15 @@ describe('getContext()', () => {
     });
   });
 
-  test('lee desde la clave "session:{businessId}:{sessionId}"', async () => {
+  test('lee desde la clave "ctx:{businessId}:{sessionId}"', async () => {
     const id = sid('key-format');
-    store.set(`session:${BIZ}:${id}`, JSON.stringify({
+    store.set(`ctx:${BIZ}:${id}`, JSON.stringify({
       lastIntent: 'horarios',
       lastEntity: { type: null, value: null },
       updatedAt: '2026-01-01',
     }));
     await getContext(BIZ, id);
-    expect(mockRedisInstance.get).toHaveBeenCalledWith(`session:${BIZ}:${id}`);
+    expect(mockRedisInstance.get).toHaveBeenCalledWith(`ctx:${BIZ}:${id}`);
   });
 
   test('devuelve el contexto guardado previamente', async () => {
@@ -74,13 +79,13 @@ describe('getContext()', () => {
       lastEntity: { type: 'product', value: 'pizza' },
       updatedAt: '2026-01-01T00:00:00.000Z',
     };
-    store.set(`session:${BIZ}:${id}`, JSON.stringify(ctx));
+    store.set(`ctx:${BIZ}:${id}`, JSON.stringify(ctx));
     expect(await getContext(BIZ, id)).toEqual(ctx);
   });
 
   test('devuelve null-context si Redis devuelve JSON inválido (resiliencia)', async () => {
     const id = sid('bad-json');
-    store.set(`session:${BIZ}:${id}`, 'not-a-json-string{{');
+    store.set(`ctx:${BIZ}:${id}`, 'not-a-json-string{{');
     const ctx = await getContext(BIZ, id);
     expect(ctx).toEqual(EMPTY_CONTEXT);
   });
@@ -93,7 +98,7 @@ describe('getContext()', () => {
 
   test('migrates old format { lastProduct } → { lastEntity: { type, value } }', async () => {
     const id = sid('migrate');
-    store.set(`session:${BIZ}:${id}`, JSON.stringify({
+    store.set(`ctx:${BIZ}:${id}`, JSON.stringify({
       lastIntent: 'precios',
       lastProduct: 'hamburguesa',
       lastEntities: {},
@@ -107,7 +112,7 @@ describe('getContext()', () => {
 
   test('migrates old format with null lastProduct', async () => {
     const id = sid('migrate-null');
-    store.set(`session:${BIZ}:${id}`, JSON.stringify({
+    store.set(`ctx:${BIZ}:${id}`, JSON.stringify({
       lastIntent: 'horarios',
       lastProduct: null,
       lastEntities: {},
@@ -125,16 +130,16 @@ describe('updateContext()', () => {
     const id = sid('setex');
     await updateContext(BIZ, id, { lastIntent: 'horarios' });
     expect(mockRedisInstance.setex).toHaveBeenCalledTimes(1);
-    const lastCall = mockRedisInstance.setex.mock.calls.find(([k]) => k === `session:${BIZ}:${id}`);
+    const lastCall = mockRedisInstance.setex.mock.calls.find(([k]) => k === `ctx:${BIZ}:${id}`);
     expect(lastCall).toBeDefined();
-    expect(lastCall[0]).toBe(`session:${BIZ}:${id}`);
+    expect(lastCall[0]).toBe(`ctx:${BIZ}:${id}`);
     expect(lastCall[1]).toBe(210); // TTL exacto
   });
 
   test('el TTL es exactamente 210 segundos', async () => {
     const id = sid('ttl');
     await updateContext(BIZ, id, { lastIntent: 'precios' });
-    const setexCall = mockRedisInstance.setex.mock.calls.find(([k]) => k === `session:${BIZ}:${id}`);
+    const setexCall = mockRedisInstance.setex.mock.calls.find(([k]) => k === `ctx:${BIZ}:${id}`);
     expect(setexCall[1]).toBe(210);
   });
 
@@ -230,6 +235,9 @@ describe('Fallback en memoria — flujo con Redis caído', () => {
     // Restaurar el mock de Redis al comportamiento normal
     mockRedisInstance.get.mockImplementation(async (key) => store.get(key) ?? null);
     mockRedisInstance.setex.mockImplementation(async (key, _ttl, val) => { store.set(key, val); return 'OK'; });
+    mockRedisInstance.rpush.mockImplementation(async (key, val) => { const l = listStore.get(key) || []; l.push(val); listStore.set(key, l); return l.length; });
+    mockRedisInstance.lrange.mockImplementation(async (key, s, e) => { const l = listStore.get(key) || []; return e === -1 ? l.slice(s) : l.slice(s, e + 1); });
+    mockRedisInstance.expire.mockImplementation(async () => 1);
   });
 
   test('cuando Redis falla al guardar, el contexto se preserva en el fallback en memoria', async () => {

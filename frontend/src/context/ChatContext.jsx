@@ -3,19 +3,22 @@
  *
  * Holds: current room, messages, username, and typing indicators.
  *
- * SCALING TIP:
- *   When state grows (multiple rooms, user lists, notifications), replace
- *   useState with useReducer here, or graduate to Zustand for a flat,
- *   selector-friendly store without prop drilling.
+ * ISOLACIÓN POR SESIÓN:
+ *   El roomId se calcula como `${businessId}:${sessionId}`, garantizando que
+ *   cada usuario tenga su propio canal Socket.io y su propio historial en Redis.
+ *   Dos dispositivos del mismo usuario generan UUIDs distintos → salas distintas
+ *   → históricos y mensajes en tiempo real completamente separados.
  */
 
 import React, { createContext, useContext, useState, useCallback } from 'react';
+import socketService from '../services/socketService';
 
 const ChatContext = createContext(null);
 
 export const ChatProvider = ({ children, businessId, businessName = '' }) => {
   const [messages, setMessages]       = useState([]);
-  const [roomId, setRoomId]           = useState('general');
+  // roomId único por sesión: evita que dos dispositivos compartan la misma sala Socket.io
+  const [roomId, setRoomId]           = useState(() => `${businessId}:${socketService.getSessionId()}`);
   const [username, setUsername]       = useState('');
   const [typingUsers, setTypingUsers] = useState([]);
   const [voiceEnabled, setVoiceEnabled] = useState(false);

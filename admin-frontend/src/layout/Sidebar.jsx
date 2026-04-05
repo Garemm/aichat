@@ -3,14 +3,18 @@ import { motion } from 'framer-motion';
 import Icon from '../components/ui/Icon';
 
 const links = [
-  { to: '/dashboard',   label: 'Dashboard',   icon: 'dashboard'   },
-  { to: '/products',    label: 'Productos',    icon: 'products'    },
-  { to: '/categories',  label: 'Categorías',   icon: 'categories'  },
-  { to: '/import',      label: 'Importar Productos',     icon: 'upload'      },
-  { to: '/services',    label: 'Servicios',    icon: 'services'    },
-  { to: '/promotions',  label: 'Promociones',  icon: 'promotions'  },
-  { to: '/hours',       label: 'Horarios',     icon: 'hours'       },
-  { to: '/business',    label: 'Mi Negocio',   icon: 'business'    },
+  { to: '/dashboard',   label: 'Dashboard',           icon: 'dashboard'  },
+  { to: '/products',    label: 'Productos',            icon: 'products'   },
+  { to: '/categories',  label: 'Categorías',           icon: 'categories' },
+  { to: '/import',      label: 'Importar Productos',   icon: 'upload'     },
+  { to: '/services',    label: 'Servicios',            icon: 'services'   },
+  { to: '/promotions',  label: 'Promociones',          icon: 'promotions' },
+  { to: '/hours',       label: 'Horarios',             icon: 'hours'      },
+  { to: '/business',    label: 'Mi Negocio',           icon: 'business'   },
+];
+
+const bottomLinks = [
+  { to: '/change-password', label: 'Cambiar contraseña', icon: 'lock' },
 ];
 
 // Stagger container: each child animates in sequence
@@ -106,6 +110,19 @@ const Sidebar = ({ onClose }) => {
           </motion.div>
         ))}
       </motion.nav>
+
+      {/* Footer — change password, visually separated */}
+      <motion.div
+        className="sidebar__footer"
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ delay: 0.45, duration: 0.3 }}
+      >
+        <div className="sidebar__divider" />
+        {bottomLinks.map(({ to, label, icon }) => (
+          <SidebarLink key={to} to={to} label={label} icon={icon} onClick={handleNav} />
+        ))}
+      </motion.div>
     </aside>
   );
 };

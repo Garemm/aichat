@@ -4,14 +4,15 @@ import { useAuth } from '../context/AuthContext';
 import Icon from '../components/ui/Icon';
 
 const TITLES = {
-  '/dashboard':   'Dashboard',
-  '/products':    'Productos',
-  '/categories':  'Categorías',
-  '/import':      'Importar',
-  '/services':    'Servicios',
-  '/promotions':  'Promociones',
-  '/hours':       'Horarios',
-  '/business':    'Mi Negocio',
+  '/dashboard':       'Dashboard',
+  '/products':        'Productos',
+  '/categories':      'Categorías',
+  '/import':          'Importar',
+  '/services':        'Servicios',
+  '/promotions':      'Promociones',
+  '/hours':           'Horarios',
+  '/business':        'Mi Negocio',
+  '/change-password': 'Cambiar Contraseña',
 };
 
 const Navbar = ({ onMenuClick }) => {

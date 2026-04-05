@@ -133,6 +133,7 @@ const Products = () => {
             <thead>
               <tr>
                 <th>Nombre</th>
+                <th>Código de ítem</th>
                 <th>Categoría</th>
                 <th>Precio</th>
                 <th>Stock</th>
@@ -144,6 +145,7 @@ const Products = () => {
               {filtered.map((p) => (
                 <tr key={p.id}>
                   <td><strong>{p.name}</strong></td>
+                  <td>{p.item_code_empresa ?? '—'}</td>
                   <td>{p.category_name ?? '—'}</td>
                   <td>${Number(p.price).toFixed(2)}</td>
                   <td>{p.stock_quantity}</td>
@@ -163,7 +165,7 @@ const Products = () => {
                 </tr>
               ))}
               {filtered.length === 0 && (
-                <tr><td colSpan={6} className="table-empty">
+                <tr><td colSpan={7} className="table-empty">
                   {products.length === 0 ? 'Sin productos' : 'No hay coincidencias'}
                 </td></tr>
               )}

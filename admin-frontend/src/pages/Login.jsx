@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 
 const Login = () => {
@@ -49,6 +49,15 @@ const Login = () => {
         <button type="submit" disabled={loading || !form.username || !form.password}>
           {loading ? 'Entrando…' : 'Iniciar sesión'}
         </button>
+
+        <p className="login-card__footer">
+          <Link to="/forgot-password" className="register-link">¿Olvidaste tu contraseña?</Link>
+        </p>
+
+        <p className="login-card__footer">
+          ¿No tienes cuenta?{' '}
+          <Link to="/register" className="register-link">Crear cuenta</Link>
+        </p>
       </form>
     </div>
   );

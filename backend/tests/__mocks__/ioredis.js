@@ -14,7 +14,8 @@
  * takes precedence over this mapper for that file only.
  */
 
-const store = new Map();
+const store    = new Map();
+const listStore = new Map(); // Separate store for List keys (history)
 
 class RedisMock {
   constructor() {
@@ -28,6 +29,24 @@ class RedisMock {
   async setex(key, _ttl, value) {
     store.set(key, value);
     return 'OK';
+  }
+
+  // Redis List operations — used by redisService history functions
+  async rpush(key, value) {
+    const list = listStore.get(key) || [];
+    list.push(value);
+    listStore.set(key, list);
+    return list.length;
+  }
+
+  async lrange(key, start, end) {
+    const list = listStore.get(key) || [];
+    if (end === -1) return list.slice(start);
+    return list.slice(start, end + 1);
+  }
+
+  async expire(key, _ttl) {
+    return 1; // 1 = key exists and TTL was set
   }
 
   // No-op event listener — ioredis emits 'connect', 'error', 'reconnecting'

@@ -10,6 +10,14 @@
  *   - Message persistence and emission
  *   - Typing indicators
  *   - Idle-timeout reengagement message
+ *
+ * MESSAGE HISTORY:
+ *   Stored in Redis under hist:<businessId>:<sessionId> (TTL: 24 h).
+ *   The in-memory MessageModel is used ONLY as a per-process write-through
+ *   cache for messages emitted during the current connection (so that the
+ *   bot reply can be emitted back without an extra Redis round-trip).
+ *   On join_room the authoritative history is always fetched from Redis so
+ *   that messages persist across page reloads and reconnects.
  */
 
 const { Server } = require('socket.io');
@@ -17,6 +25,7 @@ const MessageService    = require('../services/messageService');
 const { processMessage } = require('../services/messagePipeline');
 const { CLIENT_URL }    = require('../config/env');
 const { getContext, updateContext, SESSION_TTL_SECONDS } = require('../services/sessionContextService');
+const { getHistory, saveMessage: redisSaveMessage } = require('../services/redisService');
 const { getCategories } = require('../services/businessInfoService');
 const { formatList }    = require('../services/intentResponseFormatter');
 const BusinessModel     = require('../models/businessModel');
@@ -61,7 +70,21 @@ function resetIdleTimer(sessionId, roomId, businessId) {
         availableCategories: categories,
       });
 
-      const botMsg = MessageService.saveMessage({ roomId, sender: 'Bot', text: replyText });
+      const botTimestamp = new Date().toISOString();
+      const botMsg = {
+        id:        require('crypto').randomUUID(),
+        roomId,
+        sender:    'Bot',
+        text:      replyText,
+        timestamp: botTimestamp,
+      };
+      // Persist re-engagement message to Redis history
+      await redisSaveMessage(businessId, sessionId, {
+        id:        botMsg.id,
+        sender:    'Bot',
+        text:      replyText,
+        timestamp: botTimestamp,
+      });
       if (io) io.to(roomId).emit('receive_message', botMsg);
     } catch (err) {
       console.warn('[Idle] Error al enviar mensaje de pausa:', err.message);
@@ -90,15 +113,23 @@ const initSocket = (httpServer) => {
     console.log(`[Socket] Connected:    ${socket.id}`);
 
     // ── Join a room ──────────────────────────────────────────────────────────
-    socket.on('join_room', async ({ roomId, businessId } = {}) => {
+    socket.on('join_room', async ({ roomId, businessId, sessionId } = {}) => {
       if (!roomId) return;
       socket.join(roomId);
       console.log(`[Socket] ${socket.id} joined room: ${roomId}`);
 
-      const history = MessageService.getRoomMessages(roomId);
+      // Load history from Redis when sessionId is available; fall back to
+      // in-process MessageModel for clients that haven't migrated yet.
+      let history = [];
+      if (sessionId && businessId) {
+        history = await getHistory(businessId, sessionId);
+      } else {
+        history = MessageService.getRoomMessages(roomId);
+      }
+
       socket.emit('message_history', history);
 
-      // Send welcome message only for brand-new rooms (no history yet)
+      // Send welcome message only for brand-new sessions (no history yet)
       if (history.length === 0 && businessId) {
         try {
           const name = await BusinessModel.getName(businessId);
@@ -111,11 +142,21 @@ const initSocket = (httpServer) => {
             `• Horarios de atención\n` +
             `• Cómo contactarnos o comprar\n\n` +
             `¡Es un placer atenderte! 😊`;
-          const welcomeMsg = MessageService.saveMessage({
-            roomId,
-            sender: 'Bot',
-            text: welcomeText,
-          });
+          const welcomeMsg = {
+            id:        require('crypto').randomUUID(),
+            sender:    'Bot',
+            text:      welcomeText,
+            timestamp: new Date().toISOString(),
+          };
+          // Persist welcome message to history (include id for React key)
+          if (sessionId && businessId) {
+            await redisSaveMessage(businessId, sessionId, {
+              id:        welcomeMsg.id,
+              sender:    welcomeMsg.sender,
+              text:      welcomeMsg.text,
+              timestamp: welcomeMsg.timestamp,
+            });
+          }
           socket.emit('receive_message', welcomeMsg);
         } catch (err) {
           console.warn('[Welcome] Error al enviar mensaje de bienvenida:', err.message);
@@ -139,22 +180,54 @@ const initSocket = (httpServer) => {
         // Track which sessionId this socket is using (needed for disconnect cleanup)
         socketSessions.set(socket.id, sessionId);
 
-        // 1. Save and emit user message
-        const message = MessageService.saveMessage({ roomId, sender, text });
+        const userTimestamp = new Date().toISOString();
+
+        // 1. Build and emit user message (shape matches history entries)
+        const message = {
+          id:        require('crypto').randomUUID(),
+          roomId,
+          sender,
+          text,
+          timestamp: userTimestamp,
+        };
         io.to(roomId).emit('receive_message', message);
 
-        // 2. Process through NLP pipeline
+        // 2. Persist user message to Redis history (include id for React key)
+        await redisSaveMessage(businessId, sessionId, {
+          id:        message.id,
+          sender,
+          text,
+          timestamp: userTimestamp,
+        });
+
+        // 3. Process through NLP pipeline
         const { replyText } = await processMessage({
           text,
           sessionId,
           businessId,
         });
 
-        // 3. Save and emit bot response
-        const botMsg = MessageService.saveMessage({ roomId, sender: 'Bot', text: replyText });
+        const botTimestamp = new Date().toISOString();
+
+        // 4. Build and emit bot response
+        const botMsg = {
+          id:        require('crypto').randomUUID(),
+          roomId,
+          sender:    'Bot',
+          text:      replyText,
+          timestamp: botTimestamp,
+        };
         io.to(roomId).emit('receive_message', botMsg);
 
-        // 4. Reset idle timer — clock starts from the last bot reply
+        // 5. Persist bot response to Redis history (include id for React key)
+        await redisSaveMessage(businessId, sessionId, {
+          id:        botMsg.id,
+          sender:    'Bot',
+          text:      replyText,
+          timestamp: botTimestamp,
+        });
+
+        // 6. Reset idle timer — clock starts from the last bot reply
         resetIdleTimer(sessionId, roomId, businessId);
 
       } catch (err) {

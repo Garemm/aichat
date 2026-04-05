@@ -22,6 +22,38 @@ export const login = (username, password) =>
     body: JSON.stringify({ username, password }),
   }).then(handleRes);
 
+export const changePassword = (currentPassword, newPassword, confirmPassword) =>
+  fetch(`${BASE}/change-password`, {
+    method: 'PUT',
+    headers: headers(),
+    body: JSON.stringify({ currentPassword, newPassword, confirmPassword }),
+  }).then(handleRes);
+
+export const forgotPassword = (email) =>
+  fetch(`${BASE}/forgot-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email }),
+  }).then(handleRes);
+
+export const resetPassword = (token, password, confirmPassword) =>
+  fetch(`${BASE}/reset-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token, password, confirmPassword }),
+  }).then(handleRes);
+
+export const register = (data) =>
+  fetch(`${BASE}/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  }).then(async (res) => {
+    const json = await res.json();
+    if (!res.ok) throw new Error(json.message || 'Error del servidor');
+    return json;
+  });
+
 export const getDashboard  = ()     => fetch(`${BASE}/dashboard`,  { headers: headers() }).then(handleRes);
 export const getBusinessInfo = ()   => fetch(`${BASE}/business`,   { headers: headers() }).then(handleRes);
 export const updateBusiness = (data) =>

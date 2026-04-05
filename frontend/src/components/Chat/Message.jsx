@@ -49,7 +49,7 @@ const Message = ({ message, currentUser }) => {
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const time = new Date(message.createdAt).toLocaleTimeString([], {
+  const time = new Date(message.createdAt || message.timestamp).toLocaleTimeString([], {
     hour: '2-digit', minute: '2-digit',
   });
 

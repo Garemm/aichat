@@ -3,7 +3,7 @@ import { createProduct, updateProduct, getProduct } from '../../services/api';
 
 const EMPTY = {
   name: '', description: '', price: '', category_id: '',
-  is_available: true, stock_quantity: 0, attributes: [],
+  is_available: true, stock_quantity: 0, attributes: [], item_code_empresa: '',
 };
 
 const ProductForm = ({ product, categories, onSaved, onCancel }) => {
@@ -16,13 +16,14 @@ const ProductForm = ({ product, categories, onSaved, onCancel }) => {
     // Load full product with attributes from API
     getProduct(product.id).then((full) => {
       setForm({
-        name:           full.name,
-        description:    full.description ?? '',
-        price:          full.price,
-        category_id:    full.category_id ?? '',
-        is_available:   full.is_available,
-        stock_quantity: full.stock_quantity,
-        attributes:     full.attributes ?? [],
+        name:               full.name,
+        description:        full.description ?? '',
+        price:              full.price,
+        category_id:        full.category_id ?? '',
+        is_available:       full.is_available,
+        stock_quantity:     full.stock_quantity,
+        attributes:         full.attributes ?? [],
+        item_code_empresa:  full.item_code_empresa ?? '',
       });
     });
   }, [product]);
@@ -46,9 +47,10 @@ const ProductForm = ({ product, categories, onSaved, onCancel }) => {
     try {
       const payload = {
         ...form,
-        price:          parseFloat(form.price),
-        category_id:    form.category_id ? parseInt(form.category_id, 10) : null,
-        stock_quantity: parseInt(form.stock_quantity, 10),
+        price:              parseFloat(form.price),
+        category_id:        form.category_id ? parseInt(form.category_id, 10) : null,
+        stock_quantity:     parseInt(form.stock_quantity, 10),
+        item_code_empresa:  form.item_code_empresa || null,
       };
       const saved = product
         ? await updateProduct(product.id, payload)
@@ -96,6 +98,15 @@ const ProductForm = ({ product, categories, onSaved, onCancel }) => {
             <option key={c.id} value={c.id}>{c.name}</option>
           ))}
         </select>
+      </label>
+
+      <label>
+        Código de ítem
+        <input
+          placeholder="Ej: SKU-001"
+          value={form.item_code_empresa}
+          onChange={(e) => set('item_code_empresa', e.target.value)}
+        />
       </label>
 
       <label className="form-check">

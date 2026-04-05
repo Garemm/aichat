@@ -3,6 +3,7 @@ const router      = require('express').Router();
 const requireAuth = require('../middlewares/requireAuth');
 
 const authController      = require('../controllers/authController');
+const registerController  = require('../controllers/registerController');
 const businessController  = require('../controllers/businessController');
 const productController   = require('../controllers/productController');
 const categoryController  = require('../controllers/categoryController');
@@ -12,10 +13,16 @@ const promotionController = require('../controllers/promotionController');
 const hoursController     = require('../controllers/hoursController');
 
 // ── Auth (public) ─────────────────────────────────────────────────────────────
-router.post('/login', authController.login);
+router.post('/login',           authController.login);
+router.post('/register',        registerController.register);
+router.post('/forgot-password', authController.forgotPassword);
+router.post('/reset-password',  authController.resetPassword);
 
 // ── All routes below require auth ────────────────────────────────────────────
 router.use(requireAuth);
+
+// ── Change password (authenticated) ──────────────────────────────────────────
+router.put('/change-password', authController.changePassword);
 
 // ── Dashboard stats ───────────────────────────────────────────────────────────
 router.get('/dashboard', businessController.getStats);

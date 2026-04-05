@@ -5,14 +5,16 @@
  * Registers event listeners on mount, cleans them up on unmount.
  *
  * MANEJO DE SESIÓN:
- *   Cada emit de 'send_message' incluye el sessionId de la pestaña actual.
- *   socketService.getSessionId() lo lee desde sessionStorage (o lo genera
- *   si es la primera vez), garantizando una sesión por pestaña del navegador.
- *   El frontend NO almacena ni interpreta el contexto — esa responsabilidad
- *   pertenece exclusivamente al backend (Redis).
+ *   socketService.getSessionId() lee (o genera) el sessionId desde localStorage,
+ *   garantizando que el mismo usuario vea su historial de mensajes al recargar la
+ *   página dentro de las 24 h que dura el TTL de hist:<businessId>:<sessionId>
+ *   en Redis.
+ *
+ *   El sessionId se envía tanto en 'join_room' (para cargar historial) como en
+ *   'send_message' (para leer/escribir contexto NLP).
  *
  * Exposes:
- *   sendMessage    — emits 'send_message' con { roomId, sender, text, sessionId }
+ *   sendMessage    — emits 'send_message' con { roomId, sender, text, sessionId, businessId }
  *   emitTyping     — emits indicador 'typing'
  *   emitStopTyping — emits 'stop_typing'
  */
@@ -36,9 +38,11 @@ const useSocket = () => {
 
   useEffect(() => {
     const socket = socketService.connect();
+    const sessionId = socketService.getSessionId();
 
     if (joinedRoom.current !== roomId) {
-      socket.emit('join_room', { roomId, businessId });
+      // Pass sessionId so the backend can load this user's Redis history
+      socket.emit('join_room', { roomId, businessId, sessionId });
       joinedRoom.current = roomId;
     }
 
@@ -58,9 +62,9 @@ const useSocket = () => {
   }, [roomId, username, addMessage, setHistory, addTypingUser, removeTypingUser]);
 
   /**
-   * Envía el mensaje del usuario incluyendo el sessionId de la sesión actual.
-   * El backend usa el sessionId para recuperar el contexto de Redis y
-   * determinar si el mensaje es una pregunta de seguimiento.
+   * Envía el mensaje del usuario incluyendo el sessionId persistente.
+   * El backend usa el sessionId para recuperar el contexto NLP de Redis y
+   * para persistir el mensaje en hist:<businessId>:<sessionId>.
    */
   const sendMessage = (text) => {
     const sessionId = socketService.getSessionId();
