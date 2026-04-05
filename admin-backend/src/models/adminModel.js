@@ -87,6 +87,53 @@ const AdminModel = {
       [hashed_password, admin_id]
     );
   },
+
+  // ── JWT refresh token management ──────────────────────────────────────────
+
+  /**
+   * Returns admin row including refresh_token_hash — used during token refresh.
+   */
+  async findById(adminId) {
+    const { rows } = await db.query(
+      `SELECT id, username, business_id, refresh_token_hash
+       FROM admins WHERE id = $1`,
+      [adminId]
+    );
+    return rows[0] || null;
+  },
+
+  /**
+   * Stores (or replaces) the SHA-256 hash of the refresh token for the given admin.
+   * This enables single-use refresh tokens — rotating on every refresh.
+   */
+  async saveRefreshTokenHash(adminId, tokenHash) {
+    await db.query(
+      `UPDATE admins SET refresh_token_hash = $1 WHERE id = $2`,
+      [tokenHash, adminId]
+    );
+  },
+
+  /**
+   * Nullifies the stored refresh token hash, effectively invalidating all
+   * existing refresh tokens for that admin (logout / password change).
+   */
+  async clearRefreshToken(adminId) {
+    await db.query(
+      `UPDATE admins SET refresh_token_hash = NULL WHERE id = $1`,
+      [adminId]
+    );
+  },
+
+  /**
+   * Idempotent schema migration — adds refresh_token_hash column if it does not
+   * exist yet. Called once at server startup (see server.js).
+   */
+  async ensureMigrations() {
+    await db.query(`
+      ALTER TABLE admins
+      ADD COLUMN IF NOT EXISTS refresh_token_hash VARCHAR(255)
+    `);
+  },
 };
 
 module.exports = AdminModel;

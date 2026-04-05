@@ -1,6 +1,6 @@
 # LLM Chat AI — Documentación del Panel de Administración (SaaS)
 
-> Última actualización: 3 de abril de 2026 — v1.3 (email/phone/webpage_link, Import Excel, categorías CRUD, Framer Motion)
+> Última actualización: 4 de abril de 2026 — v1.4 (JWT dual-token auth, item_code_empresa en productos, bcrypt)
 > Estado: desarrollo activo
 > Archivo: `documentacionSaaS.md`
 
@@ -46,20 +46,22 @@ admin-backend/
 └── src/
     ├── app.js                      ← Express app, CORS, rutas
     ├── config/
-    │   └── database.js             ← Pool PostgreSQL (pg)
+    │   ├── database.js             ← Pool PostgreSQL (pg)
+    │   └── jwt.js                  ← signAccess/signRefresh/verifyAccess/verifyRefresh + REFRESH_COOKIE_OPTS
     ├── controllers/
-    │   ├── authController.js       ← POST /admin/login
+    │   ├── authController.js       ← login (JWT), refreshToken, logout, forgotPassword, resetPassword, changePassword
     │   ├── businessController.js   ← GET|PUT /admin/business, GET /admin/dashboard
+    │   ├── categoryController.js   ← GET /admin/categories
     │   ├── hoursController.js      ← GET|POST|DELETE /admin/hours
     │   ├── importController.js     ← POST /admin/import/products (Excel → BD)
-    │   ├── productController.js    ← CRUD /admin/products + /admin/categories
+    │   ├── productController.js    ← CRUD /admin/products
     │   ├── promotionController.js  ← CRUD /admin/promotions
     │   └── serviceController.js    ← CRUD /admin/services
     ├── middlewares/
     │   ├── errorHandler.js         ← Manejador global de errores Express
-    │   └── requireAuth.js          ← Guard: valida x-business-id header
+    │   └── requireAuth.js          ← Guard: verifica JWT access token (Authorization: Bearer)
     ├── models/
-    │   ├── adminModel.js           ← findByCredentials (tabla admins)
+    │   ├── adminModel.js           ← findByCredentials, findById, saveRefreshTokenHash, clearRefreshToken, ensureMigrations
     │   ├── businessModel.js        ← findById, update
     │   ├── categoryModel.js        ← listByBusiness
     │   ├── hoursModel.js           ← list, upsertOne, bulkSave, remove
@@ -86,7 +88,7 @@ admin-frontend/
     │       ├── Icon.jsx            ← Componente SVG con íconos inline
     │       └── Spinner.jsx         ← Spinner de carga
     ├── context/
-    │   ├── AuthContext.jsx         ← businessId en localStorage, signIn/signOut
+    │   ├── AuthContext.jsx         ← Token JWT en memoria React (sin localStorage); silent refresh en mount; auto-refresh timer 14 min
     │   └── ToastContext.jsx        ← Notificaciones toast (success/error/info)
     ├── layout/
     │   ├── AdminLayout.jsx         ← Shell: Sidebar + Navbar + Outlet; gestión hamburger
@@ -104,7 +106,7 @@ admin-frontend/
     ├── routes/
     │   └── ProtectedRoute.jsx      ← Redirige a /login si no está autenticado
     └── services/
-        └── api.js                  ← Thin wrapper sobre fetch; inyecta x-business-id
+        └── api.js                  ← HTTP client con Bearer injection, 401 retry queue, setAccessToken/setRefreshCallback
 ```
 
 ---
@@ -126,9 +128,14 @@ DB_PASSWORD=<tu_password>
 
 # CORS — URL del admin frontend
 ADMIN_CLIENT_URL=http://localhost:5174
+
+# JWT — generar con: node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
+JWT_SECRET=<64-byte-hex>
+JWT_REFRESH_SECRET=<64-byte-hex>
 ```
 
 > `ADMIN_CLIENT_URL` acepta múltiples orígenes separados por coma (igual que `CLIENT_URL` en el chat backend).
+> El servidor llama `process.exit(1)` al arrancar si `JWT_SECRET` o `JWT_REFRESH_SECRET` están ausentes.
 
 ### `admin-frontend` (Vite proxy)
 
@@ -147,11 +154,20 @@ En producción, configurar el reverse proxy (Nginx, Caddy) para redirigir `/admi
 
 ## 3. Autenticación
 
-### Mecanismo actual
+### Mecanismo — JWT dual-token
 
-La autenticación es simple y está diseñada para la etapa de desarrollo. **No usa JWT ni sesiones de servidor.**
+El sistema usa dos tokens JWTs con ciclos de vida distintos para equilibrar seguridad y UX:
 
-**Flujo de login:**
+| Token | Duración | Almacenamiento | Propósito |
+|---|---|---|---|
+| **Access token** | 15 min | Memoria React (`useState`) | Autenticar cada request (`Authorization: Bearer`) |
+| **Refresh token** | 7 días | Cookie HTTP-only (`rt`) | Renovar el access token silenciosamente |
+
+**El access token nunca toca `localStorage` ni `sessionStorage`** → protección XSS total. El refresh token es completamente opaco al JavaScript del cliente (flag `HttpOnly`).
+
+---
+
+### Flujo de login
 
 ```
 [Login.jsx]
@@ -161,54 +177,139 @@ La autenticación es simple y está diseñada para la etapa de desarrollo. **No 
 [api.js] POST /admin/login { username, password }
       │
       ▼
-[authController.js]
-  AdminModel.findByCredentials(username, password)
-  → SELECT id, username, business_id FROM admins WHERE username=$1 AND password=$2
-      │
-      ▼  si existe
-  res.json({ businessId: row.business_id })
+[authController.login]
+  AdminModel.findByCredentials(username, password)  ← bcrypt.compare()
+  signAccess({ adminId, businessId })               ← JWT 15 min
+  signRefresh({ adminId })                          ← JWT 7 días
+  AdminModel.saveRefreshTokenHash(adminId, sha256(refreshToken))
+  res.cookie('rt', refreshToken, REFRESH_COOKIE_OPTS)  ← HttpOnly, Secure en prod
+  res.json({ accessToken, businessId })
       │
       ▼
 [AuthContext.jsx]
-  localStorage.setItem('admin_business_id', businessId)
+  setAccessToken(accessToken)   ← en memoria React
   setBusinessId(businessId)
+  arms 14-min timer → silentRefresh()
 ```
 
-**Cada request autenticado:**
+---
+
+### Renovación silenciosa (silent refresh)
 
 ```
-[api.js] headers: { 'x-business-id': localStorage.getItem('admin_business_id') }
+Timer de 14 min (o en cada mount del AuthProvider)
+      │
+      ▼
+[api.js] POST /admin/refresh  (credentials: 'include' → envía cookie rt)
+      │
+      ▼
+[authController.refreshToken]
+  Verifica cookie rt → verifyRefresh(rt)
+  Compara hash SHA-256 con refresh_token_hash en DB
+  Genera nuevo accessToken + nuevo refreshToken (rotación)
+  Guarda nuevo hash en DB
+  Reemplaza cookie rt
+  res.json({ accessToken, businessId })
+      │
+      ▼
+[AuthContext.jsx]
+  setAccessToken(newAccessToken)
+  re-arma timer de 14 min
+```
+
+**Rotación de tokens:** cada llamada a `/refresh` invalida el refresh token anterior (el hash en DB se actualiza). Esto previene ataques de reutilización de tokens robados.
+
+---
+
+### Logout
+
+```
+[AuthContext.signOut()]
+      │
+      ▼
+[api.js] POST /admin/logout  (credentials: 'include')
+      │
+      ▼
+[authController.logout]
+  AdminModel.clearRefreshToken(adminId)   ← hash = NULL en DB
+  res.clearCookie('rt')
+  res.json({ success: true })
+      │
+      ▼
+[AuthContext.jsx]
+  setAccessToken(null)
+  setBusinessId(null)
+  navigate('/login')
+```
+
+---
+
+### Cada request autenticado
+
+```
+[api.js request()]
+  headers: { 'Authorization': 'Bearer <accessToken>' }
       │
       ▼
 [requireAuth.js]
-  const businessId = parseInt(req.headers['x-business-id'], 10)
-  si inválido → 401 Unauthorized
-  req.businessId = businessId
+  token = req.headers.authorization?.split(' ')[1]
+  payload = verifyAccess(token)            ← lanza 401 si expirado/inválido
+  req.adminId = payload.adminId
+  req.businessId = payload.businessId
   next()
+      │
+  Si 401 → api.js corre runRefresh()
+           obtiene nuevo accessToken
+           reintenta el request original
 ```
+
+La lógica de deduplicación en `runRefresh()` garantiza que si varios requests fallan con 401 simultáneamente, solo se hace **una** llamada a `/refresh` — todos los demás esperan en cola.
+
+---
 
 ### Tabla `admins`
 
 ```sql
 CREATE TABLE admins (
-  id          SERIAL PRIMARY KEY,
-  username    VARCHAR(100) UNIQUE NOT NULL,
-  password    VARCHAR(255) NOT NULL,   -- plain text en dev, pendiente bcrypt
-  business_id INTEGER REFERENCES businesses(id)
+  id                  SERIAL PRIMARY KEY,
+  username            VARCHAR(100) UNIQUE NOT NULL,
+  password            VARCHAR(255) NOT NULL,   -- bcrypt hash
+  business_id         INTEGER REFERENCES businesses(id),
+  refresh_token_hash  VARCHAR(255),            -- SHA-256 del refresh token activo
+  reset_token_hash    VARCHAR(255),
+  reset_token_expires TIMESTAMPTZ
 );
 ```
 
-### TODOs de seguridad pendientes
+La columna `refresh_token_hash` se añade automáticamente con `ensureMigrations()` al arrancar el servidor (`ALTER TABLE admins ADD COLUMN IF NOT EXISTS` — idempotente).
 
-- [ ] Reemplazar comparación plain-text con bcrypt (`adminModel.js`)
-- [ ] Reemplazar `x-business-id` header con JWT firmado (tiempo de expiración + refresh token)
+---
+
+### `admin-backend/src/config/jwt.js`
+
+Módulo centralizado de configuración JWT. Llama a `process.exit(1)` al cargar si los secretos no están en `.env`.
+
+| Export | Descripción |
+|---|---|
+| `signAccess(payload)` | Firma un access token con `JWT_SECRET`, expira en `15m` |
+| `signRefresh(payload)` | Firma un refresh token con `JWT_REFRESH_SECRET`, expira en `7d` |
+| `verifyAccess(token)` | Verifica y decodifica un access token |
+| `verifyRefresh(token)` | Verifica y decodifica un refresh token |
+| `REFRESH_COOKIE_OPTS` | `{ httpOnly: true, secure: (prod), sameSite: 'strict', path: '/admin', maxAge: 7d }` |
+
+---
+
+### TODOs de seguridad
+
+- [x] Reemplazar comparación plain-text con bcrypt (`adminModel.js`) ✅
+- [x] Reemplazar `x-business-id` header con JWT firmado (access 15min + refresh 7d) ✅
 - [ ] Agregar rate limiting en `/admin/login` para prevenir fuerza bruta
 
 ---
 
 ## 4. API REST — Endpoints
 
-Todos los endpoints (excepto `POST /admin/login`) requieren el header `x-business-id: <id>`.
+Todos los endpoints (excepto `POST /admin/login`, `POST /admin/refresh` y `POST /admin/logout`) requieren el header `Authorization: Bearer <accessToken>`.
 
 Base URL de desarrollo: `http://localhost:4000`
 
@@ -216,7 +317,12 @@ Base URL de desarrollo: `http://localhost:4000`
 
 | Método | Ruta | Descripción | Body | Respuesta |
 |---|---|---|---|---|
-| `POST` | `/admin/login` | Login de administrador | `{ username, password }` | `{ businessId }` |
+| `POST` | `/admin/login` | Login de administrador | `{ username, password }` | `{ accessToken, businessId }` + cookie `rt` |
+| `POST` | `/admin/refresh` | Renueva access token (cookie rt) | — | `{ accessToken, businessId }` |
+| `POST` | `/admin/logout` | Cierra sesión y revoca refresh token | — | `{ success: true }` |
+| `POST` | `/admin/forgot-password` | Envía email de recuperación | `{ email }` | `{ success: true }` |
+| `POST` | `/admin/reset-password` | Restablece contraseña con token | `{ token, newPassword }` | `{ success: true }` |
+| `POST` | `/admin/change-password` | Cambia contraseña (autenticado) | `{ currentPassword, newPassword }` | `{ success: true }` |
 
 ### Dashboard
 
@@ -243,7 +349,7 @@ Base URL de desarrollo: `http://localhost:4000`
 |---|---|---|---|
 | `GET` | `/admin/products` | Listar productos | — |
 | `GET` | `/admin/products/:id` | Obtener un producto | — |
-| `POST` | `/admin/products` | Crear producto | `{ name, price, category_id, description, is_available }` |
+| `POST` | `/admin/products` | Crear producto | `{ name, price, category_id, description, is_available, item_code_empresa }` |
 | `PUT` | `/admin/products/:id` | Actualizar producto | Cualquier campo |
 | `DELETE` | `/admin/products/:id` | Eliminar producto | — |
 
@@ -297,8 +403,8 @@ Todos los modelos usan el pool `pg` de `config/database.js`. Cada método recibe
 |---|---|
 | `listByBusiness(bizId)` | `SELECT p.*, c.name as category FROM products p JOIN categories c … WHERE p.business_id = $1` |
 | `findById(id, bizId)` | `SELECT … WHERE id = $1 AND business_id = $2` |
-| `create(bizId, data)` | `INSERT INTO products … RETURNING *` |
-| `update(id, bizId, data)` | `UPDATE products SET … WHERE id = $1 AND business_id = $2 RETURNING *` |
+| `create(bizId, data)` | `INSERT INTO products (…, item_code_empresa) … RETURNING *` |
+| `update(id, bizId, data)` | `UPDATE products SET … item_code_empresa … WHERE id=$1 AND business_id=$2 RETURNING *` |
 | `remove(id, bizId)` | `DELETE FROM products WHERE id = $1 AND business_id = $2` |
 | `countByBusiness(bizId)` | `SELECT COUNT(*) FROM products WHERE business_id = $1` |
 
@@ -336,9 +442,13 @@ Todos los modelos usan el pool `pg` de `config/database.js`. Cada método recibe
 
 ### `adminModel.js`
 
-| Método | Query |
+| Método | Query / Acción |
 |---|---|
-| `findByCredentials(username, password)` | `SELECT id, username, business_id FROM admins WHERE username=$1 AND password=$2` |
+| `findByCredentials(username, password)` | `SELECT id, username, business_id, password FROM admins WHERE username=$1` + `bcrypt.compare()` |
+| `findById(adminId)` | `SELECT * FROM admins WHERE id = $1` (incluye `refresh_token_hash`) |
+| `saveRefreshTokenHash(adminId, hash)` | `UPDATE admins SET refresh_token_hash=$2 WHERE id=$1` |
+| `clearRefreshToken(adminId)` | `UPDATE admins SET refresh_token_hash=NULL WHERE id=$1` |
+| `ensureMigrations()` | `ALTER TABLE admins ADD COLUMN IF NOT EXISTS refresh_token_hash VARCHAR(255)` — se ejecuta al arrancar el servidor |
 
 ---
 
@@ -348,7 +458,14 @@ Cada controlador sigue el patrón: recibe `req`, extrae `req.businessId` (inyect
 
 ### `authController.js`
 
-`login(req, res, next)` — valida credenciales con `AdminModel.findByCredentials`, devuelve `{ businessId }` en éxito o 401 si no existe el usuario.
+| Función | Descripción |
+|---|---|
+| `login` | Valida credenciales con `AdminModel.findByCredentials` (bcrypt). En éxito: firma access + refresh tokens, guarda hash SHA-256 del refresh en DB, establece cookie HTTP-only `rt`, devuelve `{ accessToken, businessId }` |
+| `refreshToken` | Lee la cookie `rt`, verifica firma con `verifyRefresh`, compara hash con DB, rota ambos tokens (nuevo access + nuevo refresh), actualiza hash en DB, devuelve `{ accessToken, businessId }` |
+| `logout` | Lee cookie `rt`, extrae `adminId`, llama `clearRefreshToken`, limpia cookie, devuelve `{ success: true }` |
+| `forgotPassword` | Genera token de reset, guarda hash en DB, envía email via nodemailer |
+| `resetPassword` | Verifica token + expiración, actualiza contraseña con bcrypt |
+| `changePassword` | Verifica contraseña actual con bcrypt, actualiza con nueva; revoca refresh token activo |
 
 ### `businessController.js`
 
@@ -392,10 +509,17 @@ CRUD estándar. La misma estructura que `productController`.
 **`AuthContext.jsx`**
 
 ```js
-const { businessId, isAuthenticated, signIn, signOut } = useAuth();
+const { businessId, isAuthenticated, isReady, signIn, signOut } = useAuth();
 ```
 
-Persiste `businessId` en `localStorage` bajo la clave `admin_business_id`. Todos los requests de `api.js` leen este valor para el header `x-business-id`.
+El access token vive **solo en memoria React** (`useState`) — nunca en `localStorage` ni `sessionStorage`. Al montar el `AuthProvider`, ejecuta `silentRefresh()` usando la cookie HTTP-only para restaurar la sesión sin requerir nuevo login. Mientras dura la verificación inicial, expone `isReady: false` para que la UI muestre un spinner en lugar de redirigir prematuramente.
+
+Ciclo de vida:
+- **Mount:** `silentRefresh()` → si cookie válida, obtiene `accessToken` + `businessId` y arma timer de 14 min
+- **signIn:** llama `apiLogin`, almacena tokens en memoria, arma timer
+- **Auto-refresh:** `setTimeout(silentRefresh, 14 * 60 * 1000)` se re-arma después de cada renovación exitosa
+- **signOut:** llama `apiLogout()` (limpia cookie en servidor), nullifica estado, navega a `/login`
+- Registra `silentRefresh` como `refreshCallback` en `api.js` para la recuperación de 401 automática
 
 **`ToastContext.jsx`**
 
@@ -415,7 +539,7 @@ Muestra notificaciones flotantes (esquina inferior-derecha). Se auto-eliminan de
 
 **`BusinessInfo.jsx`** — formulario para editar los datos del negocio: nombre, tipo, ciudad, dirección, teléfono, email y página web. Usa `BusinessForm.jsx`. Muestra spinner durante la carga y toast en éxito/error.
 
-**`Products.jsx`** — lista completa de productos con búsqueda por texto (filter en el frontend). Abre `ProductForm.jsx` en un modal/drawer para crear o editar. Incluye botón de eliminar con confirmación.
+**`Products.jsx`** — lista completa de productos con búsqueda por texto (filter en el frontend). Incluye columna **Código de ítem** (`item_code_empresa`). Abre `ProductForm.jsx` en un modal/drawer para crear o editar. Incluye botón de eliminar con confirmación.
 
 **`Services.jsx`** — lista de servicios del negocio. Mismo patrón que `Products.jsx` con `ServiceForm.jsx`.
 
@@ -434,7 +558,16 @@ Muestra notificaciones flotantes (esquina inferior-derecha). Se auto-eliminan de
 
 ### Servicio API (`api.js`)
 
-Thin wrapper alrededor de `fetch`. Inyecta automáticamente el header `x-business-id` en todas las llamadas autenticadas. Lanza un `Error` con el mensaje del servidor si `res.ok === false`.
+HTTP client con inyección automática de `Authorization: Bearer <accessToken>` en todas las llamadas autenticadas. Arquitectura clave:
+
+- **`setAccessToken(token)`** — llamado por `AuthContext` al recibir un nuevo access token
+- **`setRefreshCallback(fn)`** — registra la función de renovación provista por `AuthContext`
+- **`request(url, options)`** — función base: inyecta Bearer; en 401, entra en `runRefresh()` y reintenta una vez
+- **`runRefresh()`** — deduplicación: si múltiples requests fallan con 401 simultáneamente, solo se hace **una** llamada `POST /admin/refresh`; todos los demás esperan en cola
+- **`publicRequest()`** — para login, forgot/reset password (sin Bearer)
+- **`apiRefresh()`** — `POST /admin/refresh` con `credentials: 'include'` (envía cookie)
+- **`apiLogout()`** — `POST /admin/logout`, siempre resuelve (nunca lanza)
+- **`importPreview(formData)`** — maneja FormData con Bearer pero sin `Content-Type` (el browser establece el multipart boundary)
 
 ```js
 import * as api from '../services/api';
@@ -442,7 +575,7 @@ import * as api from '../services/api';
 // Ejemplos de uso:
 const stats    = await api.getDashboard();
 const products = await api.getProducts();
-await api.createProduct({ name: 'Hamburguesa', price: 150, category_id: 1 });
+await api.createProduct({ name: 'Hamburguesa', price: 150, category_id: 1, item_code_empresa: 'HAM-001' });
 await api.updateProduct(5, { price: 160 });
 await api.deleteProduct(5);
 await api.saveAllHours(days);   // days: array de 7 objetos
@@ -466,12 +599,14 @@ Ejemplo: el administrador actualiza el precio de un producto.
 [api.js]
   updateProduct(id, productData)
   → PUT /admin/products/:id
-    headers: { 'x-business-id': '1', 'Content-Type': 'application/json' }
-    body: { name, price, category_id, ... }
+    headers: { 'Authorization': 'Bearer <accessToken>', 'Content-Type': 'application/json' }
+    body: { name, price, category_id, item_code_empresa, ... }
       │
       ▼  Vite proxy (dev) → http://localhost:4000
 [requireAuth.js]
-  req.businessId = 1
+  verifyAccess(token) → { adminId, businessId }
+  req.adminId   = adminId
+  req.businessId = businessId
       │
       ▼
 [productController.update]
@@ -487,7 +622,7 @@ Ejemplo: el administrador actualiza el precio de un producto.
   refetch lista de productos
 ```
 
-El guard `AND business_id = $2` en la query garantiza que un administrador **no puede modificar datos de otro negocio**, incluso si manipula el header `x-business-id`.
+El guard `AND business_id = $2` en la query garantiza que un administrador **no puede modificar datos de otro negocio**, incluso si su token JWT perteneciera a otro `businessId`.
 
 ---
 
@@ -547,6 +682,30 @@ Breakpoints en `@media (max-width: 900px)` y `@media (max-width: 480px)`:
 ---
 
 ## 10. Historial de cambios
+
+### v1.4 — JWT dual-token auth + item_code_empresa *(4 abr 2026)*
+
+#### Autenticación JWT
+
+Reemplazo completo del mecanismo de autenticación basado en `x-business-id` header por JWT dual-token con rotación y revocación en base de datos.
+
+- **`admin-backend/src/config/jwt.js`** _(nuevo)_ — helpers centralizados: `signAccess` (15 min), `signRefresh` (7 días), `verifyAccess`, `verifyRefresh`, `REFRESH_COOKIE_OPTS` (HttpOnly, Secure en prod, SameSite Strict). Guard de arranque: `process.exit(1)` si los secretos no están en `.env`
+- **`server.js`** — ejecuta `AdminModel.ensureMigrations()` antes de `app.listen()`
+- **`adminModel.js`** — new methods: `findById`, `saveRefreshTokenHash`, `clearRefreshToken`, `ensureMigrations`; `findByCredentials` actualizado a bcrypt
+- **`authController.js`** — reescrito: `login` emite access + refresh tokens + cookie; nuevos handlers `refreshToken` (rotación) + `logout` (revocación); `changePassword` revoca refresh token activo
+- **`requireAuth.js`** — reescrito: lee `Authorization: Bearer`, verifica con `verifyAccess`, inyecta `req.adminId` + `req.businessId`
+- **`routes/index.js`** — added public routes `POST /refresh` y `POST /logout` antes del `router.use(requireAuth)`
+- **`app.js`** — added `cookie-parser`
+- **`AuthContext.jsx`** — reescrito: access token en memoria, `silentRefresh` en mount, auto-refresh timer 14 min, `isReady` gate para evitar redirect prematuro
+- **`api.js`** — reescrito: `setAccessToken`/`setRefreshCallback`, inyección Bearer, `runRefresh()` con deduplicación de 401, `importPreview` con Bearer sin Content-Type
+
+#### Campo `item_code_empresa` en productos
+
+- **`productModel.js`** → `create` y `update` incluyen `item_code_empresa`
+- **`Products.jsx`** → nueva columna "Código de ítem" en la tabla; colSpan actualizado 6→7
+- **`ProductForm.jsx`** → nuevo campo "Código de ítem" (text input); campo en estado `EMPTY`, `useEffect` y payload de submit
+
+---
 
 ### v1.0 — Scaffold inicial
 
@@ -611,9 +770,10 @@ Breakpoints en `@media (max-width: 900px)` y `@media (max-width: 480px)`:
 - La tabla `admins` debe tener al menos un registro
 
 ```sql
--- Crear un administrador de prueba
+-- Crear un administrador de prueba (password = bcrypt hash de 'admin123')
 INSERT INTO admins (username, password, business_id)
-VALUES ('admin', 'admin123', 1);
+VALUES ('admin', '$2b$10$...', 1);
+-- O en Node: const hash = await bcrypt.hash('admin123', 10);
 ```
 
 ### Admin Backend

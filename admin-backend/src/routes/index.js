@@ -16,8 +16,9 @@ const hoursController     = require('../controllers/hoursController');
 router.post('/login',           authController.login);
 router.post('/register',        registerController.register);
 router.post('/forgot-password', authController.forgotPassword);
-router.post('/reset-password',  authController.resetPassword);
-
+router.post('/reset-password',  authController.resetPassword);// Refresh + logout use the HTTP-only cookie — no access token needed
+router.post('/refresh',         authController.refreshToken);
+router.post('/logout',          authController.logout);
 // ── All routes below require auth ────────────────────────────────────────────
 router.use(requireAuth);
 

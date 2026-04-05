@@ -1,127 +1,189 @@
-// ── API service — thin wrapper around fetch ──────────────────────────────────
-// All requests go to /admin (proxied to http://localhost:4000 in dev).
+// ── API service — JWT-authenticated fetch wrapper ────────────────────────────
+// Access token lives in module scope (memory only — never localStorage).
+// AuthContext owns the token lifecycle; it registers callbacks here.
+
 const BASE = '/admin';
 
-const getBusinessId = () => localStorage.getItem('admin_business_id') || '';
+// ── Token store (module-level, no persistence) ────────────────────────────────
+let _accessToken = null;
 
-const headers = () => ({
+/**
+ * Called by AuthContext every time a new access token is obtained
+ * (on login or on silent refresh).
+ */
+export const setAccessToken = (token) => { _accessToken = token; };
+
+// ── Refresh queue (prevents duplicate refresh calls on concurrent 401s) ───────
+let _refreshFn  = null;
+let _refreshing = false;
+let _refreshQueue = [];
+
+/**
+ * Called by AuthContext on mount to register the silent-refresh function.
+ * When any authenticated request receives a 401, api.js calls this function
+ * once (even if several requests failed simultaneously) and retries all of them.
+ */
+export const setRefreshCallback = (fn) => { _refreshFn = fn; };
+
+const runRefresh = () => {
+  if (_refreshing) {
+    // Already in progress — enqueue and wait for the same result
+    return new Promise((resolve, reject) => _refreshQueue.push({ resolve, reject }));
+  }
+  _refreshing = true;
+  return _refreshFn()
+    .then((token) => { _refreshQueue.forEach((p) => p.resolve(token)); return token; })
+    .catch((err)  => { _refreshQueue.forEach((p) => p.reject(err));   throw err;  })
+    .finally(()   => { _refreshing = false; _refreshQueue = []; });
+};
+
+// ── Internal fetch helpers ────────────────────────────────────────────────────
+const authHeaders = (extra = {}) => ({
   'Content-Type': 'application/json',
-  'x-business-id': getBusinessId(),
+  ...(_accessToken ? { Authorization: `Bearer ${_accessToken}` } : {}),
+  ...extra,
 });
 
-const handleRes = async (res) => {
+/**
+ * Authenticated request with automatic 401 → refresh → retry.
+ * Pass { skipRetry: true } to skip the retry (used internally to avoid loops).
+ */
+const request = async (url, options = {}) => {
+  const { skipRetry = false, extraHeaders = {}, ...fetchOpts } = options;
+  const makeHeaders = () => authHeaders(extraHeaders);
+
+  let res = await fetch(url, { ...fetchOpts, headers: makeHeaders() });
+
+  if (res.status === 401 && !skipRetry && _refreshFn) {
+    try {
+      await runRefresh();
+      // Retry once with the new token now pushed into _accessToken by silentRefresh
+      res = await fetch(url, { ...fetchOpts, headers: makeHeaders() });
+    } catch {
+      throw new Error('Sesión expirada');
+    }
+  }
+
   const json = await res.json();
   if (!res.ok) throw new Error(json.error || 'Error del servidor');
   return json.data ?? json;
 };
 
+/**
+ * Public (unauthenticated) request — no auth header, no 401 retry.
+ */
+const publicRequest = async (url, options = {}) => {
+  const res  = await fetch(url, { ...options });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.error || json.message || 'Error del servidor');
+  return json.data ?? json;
+};
+
+// ── Auth endpoints (public) ───────────────────────────────────────────────────
 export const login = (username, password) =>
-  fetch(`${BASE}/login`, {
+  publicRequest(`${BASE}/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username, password }),
-  }).then(handleRes);
+  });
 
-export const changePassword = (currentPassword, newPassword, confirmPassword) =>
-  fetch(`${BASE}/change-password`, {
-    method: 'PUT',
-    headers: headers(),
-    body: JSON.stringify({ currentPassword, newPassword, confirmPassword }),
-  }).then(handleRes);
-
-export const forgotPassword = (email) =>
-  fetch(`${BASE}/forgot-password`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email }),
-  }).then(handleRes);
-
-export const resetPassword = (token, password, confirmPassword) =>
-  fetch(`${BASE}/reset-password`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token, password, confirmPassword }),
-  }).then(handleRes);
-
-export const register = (data) =>
-  fetch(`${BASE}/register`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data),
-  }).then(async (res) => {
+/**
+ * Silent refresh — uses the HTTP-only `rt` cookie automatically.
+ * credentials: 'include' is technically redundant on same-origin (Vite proxy),
+ * but is required in production if the API is on a different subdomain.
+ */
+export const apiRefresh = () =>
+  fetch(`${BASE}/refresh`, { method: 'POST', credentials: 'include' }).then(async (res) => {
     const json = await res.json();
-    if (!res.ok) throw new Error(json.message || 'Error del servidor');
+    if (!res.ok) throw new Error(json.error || 'Sesión expirada');
     return json;
   });
 
-export const getDashboard  = ()     => fetch(`${BASE}/dashboard`,  { headers: headers() }).then(handleRes);
-export const getBusinessInfo = ()   => fetch(`${BASE}/business`,   { headers: headers() }).then(handleRes);
-export const updateBusiness = (data) =>
-  fetch(`${BASE}/business`, { method: 'PUT', headers: headers(), body: JSON.stringify(data) }).then(handleRes);
+export const apiLogout = () =>
+  fetch(`${BASE}/logout`, { method: 'POST', credentials: 'include' })
+    .catch(() => undefined); // always succeeds on the client side
 
-export const getCategories = () => fetch(`${BASE}/categories`, { headers: headers() }).then(handleRes);
-export const createCategory = (data) =>
-  fetch(`${BASE}/categories`, { method: 'POST', headers: headers(), body: JSON.stringify(data) }).then(handleRes);
-export const updateCategory = (id, data) =>
-  fetch(`${BASE}/categories/${id}`, { method: 'PUT', headers: headers(), body: JSON.stringify(data) }).then(handleRes);
-export const deleteCategory = (id) =>
-  fetch(`${BASE}/categories/${id}`, { method: 'DELETE', headers: headers() }).then(handleRes);
+export const forgotPassword = (email) =>
+  publicRequest(`${BASE}/forgot-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email }),
+  });
+
+export const resetPassword = (token, password, confirmPassword) =>
+  publicRequest(`${BASE}/reset-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token, password, confirmPassword }),
+  });
+
+export const register = (data) =>
+  publicRequest(`${BASE}/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+
+// ── Authenticated endpoints ───────────────────────────────────────────────────
+export const changePassword = (currentPassword, newPassword, confirmPassword) =>
+  request(`${BASE}/change-password`, {
+    method: 'PUT',
+    body: JSON.stringify({ currentPassword, newPassword, confirmPassword }),
+  });
+
+export const getDashboard    = ()     => request(`${BASE}/dashboard`);
+export const getBusinessInfo = ()     => request(`${BASE}/business`);
+export const updateBusiness  = (data) => request(`${BASE}/business`, { method: 'PUT', body: JSON.stringify(data) });
+
+// ── Categories ────────────────────────────────────────────────────────────────
+export const getCategories  = ()          => request(`${BASE}/categories`);
+export const createCategory = (data)      => request(`${BASE}/categories`,     { method: 'POST',   body: JSON.stringify(data) });
+export const updateCategory = (id, data)  => request(`${BASE}/categories/${id}`, { method: 'PUT',  body: JSON.stringify(data) });
+export const deleteCategory = (id)        => request(`${BASE}/categories/${id}`, { method: 'DELETE' });
 
 // ── Products ──────────────────────────────────────────────────────────────────
-export const getProducts   = ()     => fetch(`${BASE}/products`,       { headers: headers() }).then(handleRes);
-export const getProduct    = (id)   => fetch(`${BASE}/products/${id}`, { headers: headers() }).then(handleRes);
-export const createProduct = (data) =>
-  fetch(`${BASE}/products`, { method: 'POST', headers: headers(), body: JSON.stringify(data) }).then(handleRes);
-export const updateProduct = (id, data) =>
-  fetch(`${BASE}/products/${id}`, { method: 'PUT', headers: headers(), body: JSON.stringify(data) }).then(handleRes);
-export const deleteProduct = (id) =>
-  fetch(`${BASE}/products/${id}`, { method: 'DELETE', headers: headers() }).then(handleRes);
+export const getProducts   = ()          => request(`${BASE}/products`);
+export const getProduct    = (id)        => request(`${BASE}/products/${id}`);
+export const createProduct = (data)      => request(`${BASE}/products`,     { method: 'POST',   body: JSON.stringify(data) });
+export const updateProduct = (id, data)  => request(`${BASE}/products/${id}`, { method: 'PUT',  body: JSON.stringify(data) });
+export const deleteProduct = (id)        => request(`${BASE}/products/${id}`, { method: 'DELETE' });
 
 // ── Services ──────────────────────────────────────────────────────────────────
-export const getServices   = ()     => fetch(`${BASE}/services`,       { headers: headers() }).then(handleRes);
-export const getService    = (id)   => fetch(`${BASE}/services/${id}`, { headers: headers() }).then(handleRes);
-export const createService = (data) =>
-  fetch(`${BASE}/services`, { method: 'POST', headers: headers(), body: JSON.stringify(data) }).then(handleRes);
-export const updateService = (id, data) =>
-  fetch(`${BASE}/services/${id}`, { method: 'PUT', headers: headers(), body: JSON.stringify(data) }).then(handleRes);
-export const deleteService = (id) =>
-  fetch(`${BASE}/services/${id}`, { method: 'DELETE', headers: headers() }).then(handleRes);
+export const getServices   = ()          => request(`${BASE}/services`);
+export const getService    = (id)        => request(`${BASE}/services/${id}`);
+export const createService = (data)      => request(`${BASE}/services`,     { method: 'POST',   body: JSON.stringify(data) });
+export const updateService = (id, data)  => request(`${BASE}/services/${id}`, { method: 'PUT',  body: JSON.stringify(data) });
+export const deleteService = (id)        => request(`${BASE}/services/${id}`, { method: 'DELETE' });
 
 // ── Promotions ────────────────────────────────────────────────────────────────
-export const getPromotions   = ()     => fetch(`${BASE}/promotions`,       { headers: headers() }).then(handleRes);
-export const getPromotion    = (id)   => fetch(`${BASE}/promotions/${id}`, { headers: headers() }).then(handleRes);
-export const createPromotion = (data) =>
-  fetch(`${BASE}/promotions`, { method: 'POST', headers: headers(), body: JSON.stringify(data) }).then(handleRes);
-export const updatePromotion = (id, data) =>
-  fetch(`${BASE}/promotions/${id}`, { method: 'PUT', headers: headers(), body: JSON.stringify(data) }).then(handleRes);
-export const deletePromotion = (id) =>
-  fetch(`${BASE}/promotions/${id}`, { method: 'DELETE', headers: headers() }).then(handleRes);
+export const getPromotions   = ()          => request(`${BASE}/promotions`);
+export const getPromotion    = (id)        => request(`${BASE}/promotions/${id}`);
+export const createPromotion = (data)      => request(`${BASE}/promotions`,     { method: 'POST',   body: JSON.stringify(data) });
+export const updatePromotion = (id, data)  => request(`${BASE}/promotions/${id}`, { method: 'PUT',  body: JSON.stringify(data) });
+export const deletePromotion = (id)        => request(`${BASE}/promotions/${id}`, { method: 'DELETE' });
 
 // ── Business Hours ────────────────────────────────────────────────────────────
-export const getHours = () =>
-  fetch(`${BASE}/hours`, { headers: headers() }).then(handleRes);
-
-export const saveHour = (data) =>
-  fetch(`${BASE}/hours`, { method: 'POST', headers: headers(), body: JSON.stringify(data) }).then(handleRes);
-
-export const saveAllHours = (days) =>
-  fetch(`${BASE}/hours/bulk`, { method: 'POST', headers: headers(), body: JSON.stringify({ days }) }).then(handleRes);
+export const getHours    = ()     => request(`${BASE}/hours`);
+export const saveHour    = (data) => request(`${BASE}/hours`,      { method: 'POST', body: JSON.stringify(data) });
+export const saveAllHours = (days) => request(`${BASE}/hours/bulk`, { method: 'POST', body: JSON.stringify({ days }) });
 
 // ── Bulk Import ───────────────────────────────────────────────────────────────
 export const importPreview = (file) => {
   const form = new FormData();
   form.append('file', file);
-  return fetch(`${BASE}/products/import/preview`, {
-    method: 'POST',
-    headers: { 'x-business-id': getBusinessId() }, // no Content-Type — let browser set multipart boundary
-    body: form,
-  }).then(handleRes);
+  // FormData: let the browser set Content-Type + boundary; inject Bearer manually
+  const headers = { ...(_accessToken ? { Authorization: `Bearer ${_accessToken}` } : {}) };
+  return fetch(`${BASE}/products/import/preview`, { method: 'POST', headers, body: form })
+    .then(async (res) => {
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || 'Error del servidor');
+      return json.data ?? json;
+    });
 };
 
-// createMissingCategories: pass true after the user confirms category creation
 export const importConfirm = (rows, createMissingCategories = false) =>
-  fetch(`${BASE}/products/import/confirm`, {
+  request(`${BASE}/products/import/confirm`, {
     method: 'POST',
-    headers: headers(),
     body: JSON.stringify({ rows, createMissingCategories }),
-  }).then(handleRes);
+  });
+

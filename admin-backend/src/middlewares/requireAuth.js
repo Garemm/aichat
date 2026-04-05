@@ -1,13 +1,21 @@
-// ── Auth middleware ───────────────────────────────────────────────────────────
-// Reads businessId from the x-business-id header set by the frontend after login.
-// TODO: Replace with JWT verification when upgrading auth.
+// ── Auth middleware (JWT) ────────────────────────────────────────────────────────
+// Reads and verifies the short-lived JWT from the Authorization: Bearer header.
+// Sets req.adminId and req.businessId for downstream handlers.
+const { verifyAccess } = require('../config/jwt');
+
 const requireAuth = (req, res, next) => {
-  const businessId = parseInt(req.headers['x-business-id'], 10);
-  if (!businessId || isNaN(businessId)) {
+  const auth = req.headers['authorization'];
+  if (!auth?.startsWith('Bearer ')) {
     return res.status(401).json({ success: false, error: 'Unauthorized' });
   }
-  req.businessId = businessId;
-  next();
+  try {
+    const payload  = verifyAccess(auth.slice(7));
+    req.adminId    = payload.adminId;
+    req.businessId = payload.businessId;
+    next();
+  } catch {
+    return res.status(401).json({ success: false, error: 'Token inválido o expirado' });
+  }
 };
 
 module.exports = requireAuth;
