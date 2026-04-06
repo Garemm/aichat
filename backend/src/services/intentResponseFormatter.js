@@ -129,12 +129,15 @@ const FORMATTERS = {
     if (!row) {
       return 'Por el momento no tengo información disponible para guiarte en la compra. Intenta de nuevo más tarde.';
     }
-    const parts = ['😊 Con gusto te ayudo con tu compra.'];
-    if (row.webpage_link) parts.push(`Puedes visitar nuestra tienda en línea en ${row.webpage_link}.`);
-    if (row.city) parts.push(`También puedes visitarnos en ${row.city}.`);
-    if (row.description) parts.push(row.description);
-    parts.push('Si tienes alguna duda, solo pregúntame.');
-    return parts.join(' ');
+    const contactParts = [];
+    if (row.phone)        contactParts.push(`llámanos al ${row.phone}`);
+    if (row.email)        contactParts.push(`escríbenos a ${row.email}`);
+    if (row.webpage_link) contactParts.push(`visita nuestro sitio en ${row.webpage_link}`);
+    if (contactParts.length > 0) {
+      return `😊 Puedes contactarnos directamente: ${enumList(contactParts)}. ¿Hay algo más en lo que te pueda ayudar?`;
+    }
+    if (row.city) return `😊 Puedes visitarnos en ${row.city}. ¿Hay algo más en lo que te pueda ayudar?`;
+    return '😊 Con gusto te ayudo. Contáctanos directamente para realizar tu pedido. ¿Hay algo más en lo que te pueda ayudar?';
   },
 
   contacto(row) {
@@ -248,6 +251,33 @@ function formatServiceDetail(service) {
   return `${service.name}.${price}${desc}`.trim();
 }
 
+/**
+ * Formats a service detail response that also includes company contact info.
+ *
+ * @param {{name:string, description:string|null, price:number|null}} service
+ * @param {{phone:string|null, email:string|null, webpage_link:string|null, city:string|null}|null} contactInfo
+ * @returns {string}
+ */
+function formatServiceWithContact(service, contactInfo) {
+  const price = service.price != null
+    ? ` El precio es $${Number(service.price).toFixed(2)}.`
+    : '';
+  const desc = service.description ? ` ${service.description}` : '';
+  const servicePart = `😊 Sí, ofrecemos el servicio de ${service.name}.${price}${desc}`;
+
+  if (!contactInfo) return `${servicePart} ¿Hay algo más en lo que te pueda ayudar?`;
+
+  const contactParts = [];
+  if (contactInfo.phone)        contactParts.push(`llámanos al ${contactInfo.phone}`);
+  if (contactInfo.city)         contactParts.push(`visítanos en ${contactInfo.city}`);
+  if (contactInfo.webpage_link) contactParts.push(`visita nuestro sitio en ${contactInfo.webpage_link}`);
+
+  if (contactParts.length > 0) {
+    return `${servicePart} Para más información ${enumList(contactParts)}. ¿Hay algo más en lo que te pueda ayudar?`;
+  }
+  return `${servicePart} ¿Hay algo más en lo que te pueda ayudar?`;
+}
+
 module.exports = {
   formatIntentResponse,
   formatHorarioDay,
@@ -255,4 +285,5 @@ module.exports = {
   formatDescripcionResponse,
   formatProductAttributes,
   formatServiceDetail,
+  formatServiceWithContact,
 };

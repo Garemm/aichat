@@ -173,6 +173,53 @@ describe('decide()', () => {
     const d = decide(intentResult, entityResult, context, 'donde estan ubicados');
     expect(d.entity.value).toBeNull();
   });
+
+  // ─── Rule -1e: servicios context follow-up ──────────────────────────────────
+
+  test('Rule -1e: "y la renta de salon" en contexto servicios → servicios_followup', () => {
+    // Joint-prefix "y [article] X" must stay in servicios context, not escape to attribute handler
+    const context = { lastIntent: 'servicios', lastEntity: { type: null, value: null } };
+    const d = decide(noIntent, { type: 'attribute', value: 'y la renta de salon' }, context, 'y la renta de salon');
+    expect(d.strategy).toBe('servicios_followup');
+    expect(d.intent).toBe('servicios');
+    expect(d.usedContext).toBe(true);
+  });
+
+  test('Rule -1e: "y el menu especial" en contexto servicios → servicios_followup', () => {
+    const context = { lastIntent: 'servicios', lastEntity: { type: null, value: null } };
+    const d = decide(noIntent, { type: 'attribute', value: 'y el menu especial' }, context, 'y el menu especial');
+    expect(d.strategy).toBe('servicios_followup');
+  });
+
+  test('Rule -1e: "tiene algo con pollo?" en contexto servicios → attribute (escapa por ser ingrediente)', () => {
+    // Short attribute value with no extractable service query → must escape to product attribute search
+    const context = { lastIntent: 'servicios', lastEntity: { type: null, value: null } };
+    const d = decide(noIntent, { type: 'attribute', value: 'pollo' }, context, 'tiene algo con pollo');
+    expect(d.strategy).toBe('attribute');
+  });
+
+  test('Rule -1e: "que venden?" en contexto servicios → escapa (productos high-confidence)', () => {
+    const intentResult = { intent: 'productos', score: 3, scores: { productos: 3 }, confident: true };
+    const context = { lastIntent: 'servicios', lastEntity: { type: null, value: null } };
+    const d = decide(intentResult, { type: null, value: null }, context, 'que venden');
+    expect(d.strategy).not.toBe('servicios_followup');
+  });
+
+  test('Rule -1e: "que dias abren?" en contexto servicios → escapa (standalone intent)', () => {
+    const intentResult = { intent: 'horarios', score: 1, scores: { horarios: 1 }, confident: true };
+    const context = { lastIntent: 'servicios', lastEntity: { type: null, value: null } };
+    const d = decide(intentResult, { type: null, value: null }, context, 'que dias abren');
+    expect(d.strategy).not.toBe('servicios_followup');
+    expect(d.intent).toBe('horarios');
+  });
+
+  test('Rule -1e: nombre de servicio sin prefijo en contexto servicios → servicios_followup', () => {
+    // Plain service name (no "y", no leading article) — attribute entity but is a service follow-up
+    // via extractServiceQuery "sobre X" or servicios normalizedText fallback
+    const context = { lastIntent: 'servicios', lastEntity: { type: null, value: null } };
+    const d = decide(noIntent, { type: 'attribute', value: 'catering' }, context, 'sobre el catering');
+    expect(d.strategy).toBe('servicios_followup');
+  });
 });
 
 // ─── buildContextUpdate() ─────────────────────────────────────────────────────

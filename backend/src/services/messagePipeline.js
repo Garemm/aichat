@@ -42,7 +42,7 @@ const {
   getProductAttributes,
   getServiceByName,
 } = require('./businessInfoService');
-const { formatIntentResponse, formatHorarioDay, formatList, formatDescripcionResponse, formatProductAttributes, formatServiceDetail } = require('./intentResponseFormatter');
+const { formatIntentResponse, formatHorarioDay, formatList, formatDescripcionResponse, formatProductAttributes, formatServiceDetail, formatServiceWithContact } = require('./intentResponseFormatter');
 const { getKeywordResponse } = require('../mockai/keywordResponses');
 const { getMockOpenAIResponse, getRAGOpenAIResponse } = require('../temp/mockOpenAI');
 const { shouldUseAI, hasRelevantData } = require('./aiDecisionEngine');
@@ -58,6 +58,21 @@ const PRODUCTS_HARD_LIMIT = 20;
 
 /** Products per paginated page inside a category. */
 const PAGE_SIZE = 10;
+
+/**
+ * Genuinely standalone comprar phrases — they express purchase intent WITHOUT
+ * needing a product in context (no pronouns like "lo", "la", "me lo", etc.).
+ * Used by Rule -1d to distinguish real purchase queries from post-result
+ * pronouns like "quiero una" / "me lo llevo" that refer to a previous product.
+ */
+const COMPRAR_GENUINELY_STANDALONE = [
+  'quiero comprar', 'como puedo comprar', 'como compro', 'donde puedo comprar',
+  'quiero hacer un pedido', 'como hago un pedido', 'como puedo pedir',
+  'quiero ordenar', 'como ordeno', 'quiero adquirir', 'como lo adquiero',
+  'puedo comprar en linea', 'tienen tienda en linea', 'venden en linea',
+  'hacer pedido', 'realizar pedido', 'realizar compra', 'comprar en linea',
+  'tienda en linea', 'quiero pedirlo',
+];
 
 // ─── Pagination / category navigation helpers ─────────────────────────────────
 
@@ -163,6 +178,64 @@ function formatProductPage(rows, offset, total, category) {
     return `${base} Hay ${remaining} más. Escribe "ver más" para continuar.`;
   }
   return `${base} Eso es todo en esta categoría.`;
+}
+
+/**
+ * Friendly response when user selects a category from the prompted list.
+ * Shows up to PAGE_SIZE items in a conversational tone.
+ */
+function formatCategorySelectionResponse(category, rows, offset, total) {
+  const end       = offset + rows.length;
+  const remaining = total - end;
+  const items     = rows.map((r) =>
+    r.is_available !== false
+      ? `${r.name} a $${Number(r.price).toFixed(2)}`
+      : `${r.name} (no disponible)`
+  );
+  const listed = items.length > 1
+    ? `${items.slice(0, -1).join(', ')} y ${items[items.length - 1]}`
+    : items[0];
+  const intro = `😊 ¡Claro! En ${category} tenemos: ${listed}.`;
+  if (end < total) {
+    return `${intro} Hay ${remaining} más, escribe "ver más" para continuar.`;
+  }
+  return `${intro} Eso es todo en esta categoría. ¿Te interesa alguno en especial?`;
+}
+
+/**
+ * Extracts a service name from a user query.
+ * Handles patterns like "servicio de X", "servicio X", etc.
+ * @param {string} normalizedText
+ * @returns {string|null}
+ */
+function extractServiceQuery(normalizedText) {
+  const patterns = [
+    // Explicit "servicio de X" / "servicio X"
+    /\bservicios?\s+de\s+(.+?)(?:\?|$)/,
+    /\bservicios?\s+(.+?)(?:\?|$)/,
+    // Description queries about a service: "que incluye/contiene/trae/lleva/es X"
+    // Strip the verb phrase to get just the service-name portion.
+    /\bque\s+(?:incluye[n]?|contiene[n]?|trae[n]?|lleva[n]?|es|son)\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(.+?)(?:\?|$)/,
+    // "informacion sobre/de X" / "sobre X" / "acerca de X"
+    /\binformacion\s+(?:(?:sobre|acerca\s+de|de)\s+)?(?:el\s+|la\s+|los\s+|las\s+)?(.+?)(?:\?|$)/,
+    /^(?:sobre|acerca\s+de)\s+(?:el\s+|la\s+|los\s+|las\s+)?(.+?)(?:\?|$)/,
+    // Conjunction-prefix follow-up: "y la renta de salon", "y el menu especial"
+    // These are continuation turns where the user appends "y [el/la]" to name a service.
+    /^(?:y|e)\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(.+?)(?:\?|$)/,
+  ];
+  for (const p of patterns) {
+    const m = normalizedText.match(p);
+    if (m?.[1]) {
+      // Keep 'de' — service names often contain it (e.g. "alquiler de herramientas").
+      // Only strip leading articles/pronouns that are never part of a service name.
+      const candidate = m[1]
+        .replace(/^(?:el|la|los|las|un|una)\s+/, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (candidate.length >= 2) return candidate;
+    }
+  }
+  return null;
 }
 
 // ─── Ambiguity detection ──────────────────────────────────────────────────────
@@ -366,6 +439,81 @@ function decide(intentResult, entityResult, context, normalizedText) {
     };
   }
 
+  // Rule -1c: Still in category_selection state but no match → re-prompt with list
+  // Exception: if the user sends a standalone intent (e.g. "que servicios tienen"),
+  // let it through so the pipeline handles it normally.
+  if (context.lastIntent === 'category_selection' && context.availableCategories?.length > 0 && !(hasIntent && standalone)) {
+    return {
+      strategy: 'category_reprompt',
+      intent: null,
+      entity: { type: null, value: null },
+      usedContext: true,
+      reason: 'category_selection context: input not matched, re-prompting',
+    };
+  }
+
+  // Rule -1d: Post-result pronoun purchase phrase after a failed product lookup.
+  // Phrases like "quiero una", "me lo llevo", "lo quiero" use pronouns that refer
+  // to a previously mentioned product. If the last search returned nothing, these
+  // mean the user is asking for something that doesn't exist → surface a clear
+  // "not available" response instead of routing to generic purchase contact info.
+  if (
+    intentResult.intent === 'comprar' &&
+    context.lastEntityFound === false &&
+    context.lastEntity?.value
+  ) {
+    const hasGenuinePhrase = COMPRAR_GENUINELY_STANDALONE
+      .some((p) => normalizedText.includes(normalize(p)));
+    if (!hasGenuinePhrase) {
+      return {
+        strategy: 'product_not_found_followup',
+        intent: 'comprar',
+        entity: { type: 'product', value: context.lastEntity.value },
+        usedContext: true,
+        reason: `comprar pronoun phrase but "${context.lastEntity.value}" was not found`,
+      };
+    }
+  }
+
+  // Rule -1e: Servicios context follow-up.
+  // When the user saw a list of services and then types a follow-up (service name,
+  // "que es X", "que incluye X", "informacion sobre X", bare name, etc.) route
+  // straight to the servicios handler so it can do word-intersection matching.
+  // Must be placed before Rule 1.5 (AI prescreen) so service-name queries are
+  // never sent to the AI fallback.
+  //
+  // Intercepts when:
+  //   - lastIntent is 'servicios'
+  //   - no product/category entity was cleanly detected (attribute entities in a
+  //     services context are almost always fragments of a service name, not product
+  //     attributes — e.g. "renta de salón para eventos" → attribute="eventos")
+  //   - no standalone intent at any confidence was detected (standalone intents like
+  //     horarios/ubicacion/promociones always represent a genuine topic change and
+  //     must never be overridden by the services context)
+  //   - not a high-confidence 'productos' intent — "que venden?" / "que productos tiene?"
+  //     are unambiguous topic changes to the product catalog
+  //   - not an attribute entity (ingredient/property) with no detectable service query —
+  //     e.g. "tiene algo con pollo?" has attribute entity but refers to a product, not a service
+  //   - message is not purely ambiguous and has enough text to match against
+  if (
+    context.lastIntent === 'servicios' &&
+    entityResult.type !== 'product' &&
+    entityResult.type !== 'category' &&
+    !(hasIntent && standalone) &&
+    !(intentResult.intent === 'productos' && highConfidence) &&
+    !(entityResult.type === 'attribute' && !extractServiceQuery(normalizedText)) &&
+    !isAmbiguous(normalizedText) &&
+    normalizedText.length >= 3
+  ) {
+    return {
+      strategy: 'servicios_followup',
+      intent: 'servicios',
+      entity: { type: null, value: null },
+      usedContext: true,
+      reason: 'servicios context follow-up: matching message against service names',
+    };
+  }
+
   // Rule 0: Day-of-week entity detected → always horarios, never needs context
   if (entityResult.type === 'day') {
     return {
@@ -531,8 +679,11 @@ function decide(intentResult, entityResult, context, normalizedText) {
   // Skip if:
   //   - the last entity was a miss (would re-query a known-empty product)
   //   - the last entity is a 'day' type (temporal context must not contaminate product/recommendation queries)
+  //   - the last entity is a 'category' type — bare nouns like "postres?" should browse a NEW
+  //     category, not repeat the old one. Category pagination is handled by Rule −1a (isSeekingMore).
   if (context.lastEntity?.value && context.lastEntityFound !== false &&
       context.lastEntity?.type !== 'day' &&
+      context.lastEntity?.type !== 'category' &&
       normalizedText.length >= 2 && normalizedText.length <= 40) {
     const hasNewTopic = normalizedText.split(/\s+/).some((w) =>
       ['horario', 'horarios', 'direccion', 'contacto', 'promos', 'promociones', 'descuentos'].includes(w)
@@ -572,6 +723,16 @@ function buildContextUpdate(decision) {
 
   // Category selected — reset pagination state; executeDecision will set it
   if (decision.strategy === 'category_select') return {};
+
+  // Category reprompt — keep existing context so user can still pick a category
+  if (decision.strategy === 'category_reprompt') return {};
+
+  // Product-not-found follow-up (post-result pronoun after a miss) — no context change
+  if (decision.strategy === 'product_not_found_followup') return {};
+
+  // Servicios context follow-up — keep lastIntent as 'servicios' so the next
+  // message is still treated as a service-topic follow-up.
+  if (decision.strategy === 'servicios_followup') return { lastIntent: 'servicios' };
 
   // Attribute search — store the searched attribute(s) in Redis
   if (decision.strategy === 'attribute') {
@@ -659,11 +820,12 @@ function buildContextUpdate(decision) {
  *
  * @param {PipelineDecision} decision
  * @param {string} originalText    Raw user message
+ * @param {string} normalizedText  Preprocessed text
  * @param {number} businessId
  * @param {{ lastIntent: string|null, lastEntity: object|null }} context
  * @returns {Promise<string>}
  */
-async function executeDecision(decision, originalText, businessId, context, sessionId) {
+async function executeDecision(decision, originalText, normalizedText, businessId, context, sessionId) {
   // ── Pagination: next page of the current category ──────────────────────────
   if (decision.strategy === 'pagination') {
     try {
@@ -679,6 +841,13 @@ async function executeDecision(decision, originalText, businessId, context, sess
     } catch (err) {
       console.error('[Pipeline] Error paginating products:', err.message);
     }
+  }
+
+  // ── Category reprompt: user typed something unrecognized while in selection ─
+  if (decision.strategy === 'category_reprompt') {
+    const cats = context.availableCategories ?? [];
+    const listed = cats.slice(0, 6).join(', ');
+    return `No identifiqué esa categoría. Puedes elegir entre: ${listed}. ¿Cuál te interesa?`;
   }
 
   // ── Category selection: user picked a category ─────────────────────────────
@@ -698,7 +867,7 @@ async function executeDecision(decision, originalText, businessId, context, sess
       if (rows.length === 0) {
         return `Hmm, parece que no tenemos productos en la categoría "${cat}". ¿Quieres explorar otra?`;
       }
-      return formatProductPage(rows, 0, total, cat);
+      return formatCategorySelectionResponse(cat, rows, 0, total);
     } catch (err) {
       console.error('[Pipeline] Error loading category:', err.message);
     }
@@ -747,12 +916,38 @@ async function executeDecision(decision, originalText, businessId, context, sess
 
   // Servicios intent: show specific service detail if entity provided, else full list
   if (decision.intent === 'servicios') {
-    if (decision.entity?.value) {
+    // Build search term: entity value, or service-name pattern in text, or — for
+    // servicios_followup — the full normalized message (word-intersection handles it).
+    const serviceQuery = decision.entity?.value || extractServiceQuery(normalizedText);
+    const queryToUse   = serviceQuery || (decision.strategy === 'servicios_followup' ? normalizedText : null);
+    if (queryToUse) {
       try {
-        const services = await getServiceByName(businessId, decision.entity.value);
-        if (services.length > 0) return formatServiceDetail(services[0]);
+        const allServices = await getBusinessInfoByIntent('servicios', businessId);
+        const normQuery   = normalize(queryToUse);
+        // 1. Exact substring match (covers most cases)
+        let match = allServices.find((s) => {
+          const normName = normalize(s.name);
+          return normName.includes(normQuery) || normQuery.includes(normName);
+        });
+        // 2. Word-intersection fallback: ≥50% of meaningful query words appear in the service name
+        if (!match) {
+          const qWords = normQuery.split(/\s+/).filter((w) => w.length > 2);
+          match = allServices.find((s) => {
+            const nameWords = new Set(normalize(s.name).split(/\s+/));
+            const overlap   = qWords.filter((w) => nameWords.has(w));
+            return qWords.length > 0 && overlap.length >= Math.ceil(qWords.length / 2);
+          });
+        }
+        if (match) {
+          try {
+            const contactInfo = await getBusinessInfoByIntent('contacto', businessId);
+            return formatServiceWithContact(match, contactInfo);
+          } catch {
+            return formatServiceDetail(match);
+          }
+        }
       } catch (err) {
-        console.error('[Pipeline] Error querying service by name:', err.message);
+        console.error('[Pipeline] Error searching service by name:', err.message);
       }
     }
     try {
@@ -829,6 +1024,39 @@ async function executeDecision(decision, originalText, businessId, context, sess
     }
 
     if (decision.entity.type === 'product') {
+      // Context-aware service match: if the last turn showed services the user may
+      // be naming a service (e.g. "quiero el menú especial empresarial"). Try the
+      // services table first before falling through to the product catalog.
+      if (context.lastIntent === 'servicios') {
+        try {
+          const allServices = await getBusinessInfoByIntent('servicios', businessId);
+          const normQuery   = normalize(decision.entity.value);
+          let serviceMatch  = allServices.find((s) => {
+            const normName = normalize(s.name);
+            return normName.includes(normQuery) || normQuery.includes(normName);
+          });
+          // Word-intersection fallback (≥50% of significant words match)
+          if (!serviceMatch) {
+            const qWords = normQuery.split(/\s+/).filter((w) => w.length > 2);
+            serviceMatch = allServices.find((s) => {
+              const nameWords = new Set(normalize(s.name).split(/\s+/));
+              const overlap   = qWords.filter((w) => nameWords.has(w));
+              return qWords.length > 0 && overlap.length >= Math.ceil(qWords.length / 2);
+            });
+          }
+          if (serviceMatch) {
+            try {
+              const contactInfo = await getBusinessInfoByIntent('contacto', businessId);
+              return formatServiceWithContact(serviceMatch, contactInfo);
+            } catch {
+              return formatServiceDetail(serviceMatch);
+            }
+          }
+        } catch (err) {
+          console.error('[Pipeline] Error searching service from context:', err.message);
+        }
+      }
+
       try {
         const rows = await queryProducts(decision.entity.value, businessId);
         // Log queried products for analytics (fire-and-forget)
@@ -848,6 +1076,14 @@ async function executeDecision(decision, originalText, businessId, context, sess
         console.error('[Pipeline] Error querying product:', err.message);
       }
     }
+  }
+
+  // Post-result pronoun purchase phrase after a failed product lookup:
+  // user said something like "quiero una" / "me lo llevo" referring to a product
+  // that doesn't exist in the catalog.
+  if (decision.strategy === 'product_not_found_followup') {
+    const productName = decision.entity?.value ?? 'ese producto';
+    return `Lo siento, "${productName}" no está disponible en nuestro catálogo. ¿Te gustaría ver las opciones disponibles? 😊`;
   }
 
   // Intent-based response
@@ -1043,7 +1279,7 @@ async function processMessage({ text, sessionId, businessId }) {
     ragContext = aiResult.ragContext;
   } else {
     // Deterministic backend path
-    replyText = await executeDecision(decision, text, businessId, context, sessionId);
+    replyText = await executeDecision(decision, text, normalizedText, businessId, context, sessionId);
   }
 
   // Enrich logs with AI routing info

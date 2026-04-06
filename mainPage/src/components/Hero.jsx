@@ -71,7 +71,7 @@ export default function Hero() {
               variants={itemVariants}
               className="text-foreground-muted text-lg leading-relaxed mb-10 max-w-lg"
             >
-              Responde preguntas sobre tus productos, horarios, servicios y promociones en tiempo real.
+              Responde preguntas sobre tus productos, horarios, servicios y promociones en tiempo real las 24 horas del día.
               Motor NLP propio + IA generativa como respaldo — siempre preciso, siempre disponible.
             </motion.p>
 

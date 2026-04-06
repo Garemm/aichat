@@ -15,7 +15,7 @@
  *
  *   History  (full chat messages, longer-lived):
  *     key:  hist:<businessId>:<sessionId>
- *     TTL:  HIST_TTL_SECONDS (86400 s = 24 h)
+ *     TTL:  HIST_TTL_SECONDS (21600 s = 6 h)
  *     type: Redis List (RPUSH / LRANGE)
  *     use:  message display in UI — never touched by NLP
  *
@@ -35,7 +35,7 @@ const redis = require('../config/redis');
 
 // ─── TTL constants ─────────────────────────────────────────────────────────────
 const CTX_TTL_SECONDS  = 210;    // 3.5 minutes — conversational context window
-const HIST_TTL_SECONDS = 86400;  // 24 hours    — message history window
+const HIST_TTL_SECONDS = 21600;  // 6 hours    — message history window
 
 // ─── Key builders ──────────────────────────────────────────────────────────────
 
@@ -158,7 +158,37 @@ async function getHistory(businessId, sessionId) {
   const key = histKey(businessId, sessionId);
   try {
     const items = await redis.lrange(key, 0, -1);
-    return items.map((raw) => {
+    if (items.length === 0) return [];
+
+    const cutoff = Date.now() - HIST_TTL_SECONDS * 1000;
+
+    // Count how many leading messages are stale.
+    // Messages are stored oldest-first (RPUSH = append to tail), so all
+    // expired entries are at the front of the list.
+    // Stop counting at the first message that:
+    //   a) has no timestamp (legacy — we can't determine its age, keep it), or
+    //   b) is within the TTL window.
+    let staleCount = 0;
+    for (const raw of items) {
+      let msg;
+      try { msg = JSON.parse(raw); } catch { break; }
+      if (!msg?.timestamp) break;
+      if (new Date(msg.timestamp).getTime() >= cutoff) break;
+      staleCount++;
+    }
+
+    // Physically remove stale entries from Redis to free memory.
+    if (staleCount > 0) {
+      if (staleCount === items.length) {
+        // Every message has expired — delete the key entirely.
+        await redis.del(key);
+        return [];
+      }
+      // Trim the leading stale entries; keep everything from staleCount onward.
+      await redis.ltrim(key, staleCount, -1);
+    }
+
+    return items.slice(staleCount).map((raw) => {
       try { return JSON.parse(raw); } catch { return null; }
     }).filter(Boolean);
   } catch (err) {
@@ -169,7 +199,7 @@ async function getHistory(businessId, sessionId) {
 
 /**
  * Appends a single message to the session's history list
- * and resets the 24-hour TTL.
+ * and resets the 6-hour TTL.
  *
  * @param {number|string} businessId
  * @param {string}        sessionId
@@ -180,10 +210,16 @@ async function saveMessage(businessId, sessionId, message) {
   const key = histKey(businessId, sessionId);
   try {
     const serialized = JSON.stringify(message);
-    // RPUSH keeps insertion order (oldest first, newest last)
-    await redis.rpush(key, serialized);
-    // Reset TTL on every write — 24h from the last message
-    await redis.expire(key, HIST_TTL_SECONDS);
+    // RPUSH keeps insertion order (oldest first, newest last).
+    // Returns the new list length: 1 means this is the first message.
+    const listLen = await redis.rpush(key, serialized);
+    // Set TTL only when the key is created (first message).
+    // Using a fixed expiry instead of sliding prevents the key from living
+    // indefinitely when users chat every day — the whole key expires 6h after
+    // the session started, and getHistory() additionally filters per-message.
+    if (listLen === 1) {
+      await redis.expire(key, HIST_TTL_SECONDS);
+    }
   } catch (err) {
     console.warn('[Redis] saveMessage error:', err.message);
     // Non-fatal: UI may not show this message after refresh, but chat continues

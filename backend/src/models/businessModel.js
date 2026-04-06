@@ -227,7 +227,9 @@ const BusinessModel = {
          name,
          description,
          city,
-         webpage_link
+         webpage_link,
+         phone,
+         email
        FROM businesses
        WHERE id = $1`,
       [businessId]

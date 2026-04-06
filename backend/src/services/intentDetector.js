@@ -54,6 +54,8 @@ const DESCRIPCION_PRIORITY_PATTERNS = [
   /\bque\s+incluye[n]?\b/,
   // singular/plural trae/traen
   /\bque\s+trae[n]?\b/,
+  // singular/plural lleva/llevan ("lleva" = synonym for trae/incluye in food context)
+  /\bque\s+lleva[n]?\b/,
   // "de que está hecho/hecha"
   /\bde\s+que\s+est[aá]\b.*\bhech[oa]\b/,
 ];

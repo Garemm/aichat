@@ -37,6 +37,10 @@ const ENTITY_STOPWORDS = new Set([
   'disponible', 'disponibles', 'ese', 'esa', 'esos', 'esas',
   'algun', 'alguna', 'tambien', 'mas', 'otro', 'otra',
   'ese', 'aqui', 'ahi', 'alli', 'eso', 'esto',
+  // Prepositions that lead entity fragments but are never part of an entity name
+  'sobre', 'acerca',
+  // Affirmation that precedes a real query ("si sobre el menu...") — never entity name
+  'si',
 ]);
 
 /**
@@ -66,6 +70,8 @@ const ENTITY_BLOCKLIST = new Set([
   'que', 'precio', 'costo', 'tarifa',
   // Command verbs — imperative forms that trigger actions but are never entities
   'muestrame', 'dame', 'pasame', 'mandame', 'enviame',
+  // Freestanding prepositions / affirmations that NLP misidentifies as nouns
+  'sobre', 'acerca', 'si',
 ]);
 
 function isBlocklisted(entity) {
@@ -94,7 +100,7 @@ const PRODUCT_TRIGGER_WORDS = new Set([
   // Price-query trigger words
   'precio', 'precios', 'cuesta', 'cuanto', 'vale', 'cobran', 'costo',
   // Description-query trigger words
-  'contiene', 'incluye', 'trae', 'caracteristicas', 'especificaciones', 'descripcion',
+  'contiene', 'incluye', 'trae', 'lleva', 'llevan', 'caracteristicas', 'especificaciones', 'descripcion',
   // Catalog/menu trigger words
   'catalogo', 'menu', 'lista', 'dame', 'muestrame',
 ]);
@@ -145,8 +151,14 @@ const PRODUCT_QUERY_PATTERNS = [
   /busco\s+(?:un\s+|una\s+|el\s+|la\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
   /quiero\s+(?:un\s+|una\s+|el\s+|la\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
   /me\s+interesa\s+(?:el\s+|la\s+|los\s+|las\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
-  /info(?:rmacion)?\s+(?:de\s+)?(?:el\s+|la\s+|los\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
-  /vende[ns]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
+
+  // "informacion sobre/de/acerca de X" — descriptions requested via preposition
+  /info(?:rmacion)?\s+(?:(?:sobre|acerca\s+de|de)\s+)?(?:el\s+|la\s+|los\s+|las\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
+  // "que es/son X" — definition queries that also target product/service names
+  /^que\s+(?:es|son)\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
+  // "sobre X" / "acerca de X" — direct topic follow-up (e.g. after a service list)
+  /^(?:sobre|acerca\s+de)\s+(?:el\s+|la\s+|los\s+|las\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
+  /vende[ns]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,,
   /ofrece[ns]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
   /necesito\s+(?:un\s+|una\s+|el\s+|la\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
   // Reversed-order: entity before verb — "X tienes?" / "X hay?" / "X venden?"
@@ -156,6 +168,7 @@ const PRODUCT_QUERY_PATTERNS = [
   /(?:que\s+)?contiene[n]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+|este\s+|esta\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
   /(?:que\s+)?incluye[n]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+|este\s+|esta\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
   /(?:que\s+)?trae[n]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+|este\s+|esta\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
+  /(?:que\s+)?lleva[n]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+|este\s+|esta\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
   /de\s+que\s+esta[n]?\s+hech[oa]s?\s+(?:el\s+|la\s+|los\s+|las\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
   // "que tiene/tienen los/las X" — description of entity with article
   /que\s+tiene[n]?\s+(?:el\s+|la\s+|los\s+|las\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
@@ -497,6 +510,62 @@ async function detectEntities(message, businessId, intentResult = { intent: null
         console.error('[EntityDetector] Error querying products for tipo-de:', err.message);
       }
       return { ...empty, product: tipoCand, type: 'product', value: tipoCand, _rows: [] };
+    }
+  }
+
+  // ── "que X tienen/tienes/tiene/hay" — entity precedes verb (catalog queries) ─
+  // "que bebidas tiene?" / "que pizzas hay?" signal a category browse, not a
+  // specific product lookup. Check categories FIRST so "bebidas" doesn't match
+  // a product whose description happens to contain the word.
+  // Must run after TIPO_DE_RE ("que tipo de X") to avoid double-processing.
+  const QUE_ENTITY_TIENEN_RE = /^que\s+(?<entity>[\wñ]+(?:\s+[\wñ]+){0,4})\s+(?:tiene[sn]?|tienen|hay)\s*\??$/;
+  const queMatch = normalizedText.match(QUE_ENTITY_TIENEN_RE);
+  if (queMatch?.groups?.entity) {
+    const queCand = cleanEntityCandidate(stripLeadingStopwords(queMatch.groups.entity.trim()));
+    if (queCand && queCand.length >= 2 && !isBlocklisted(queCand)) {
+      try {
+        const categoryRows = await queryCategories(queCand, businessId);
+        if (categoryRows.length > 0) {
+          return { ...empty, category: queCand, type: 'category', value: queCand };
+        }
+      } catch (err) {
+        console.error('[EntityDetector] Error querying categories for que-entity-tienen:', err.message);
+      }
+      // Not a category → fall through to the normal candidate extraction below
+    }
+  }
+
+  // ── Short bare noun without trigger word — single-word category name typed directly ──
+  // Covers: "postres?", "bebidas?" after browsing a category; "pizzas?" as a topic switch.
+  // hasProductTrigger() returns false for these so extractEntityCandidate skips them.
+  // extractFollowUpEntity (in decide()) requires ≥ 2 tokens for bare-noun shape, so
+  // single-word nouns are its blind spot → check category then product here.
+  // NOTE: length === 1 is intentional — 2+ token bare nouns ("pizza mexicana", "y de X")
+  // are handled downstream by extractFollowUpEntity, which needs context to enrich them.
+  const BARE_NOUN_NOPE = new Set([
+    'si', 'no', 'ok', 'ya', 'bien', 'mal', 'dale', 'vale',
+    'hola', 'gracias', 'adios', 'claro', 'perfecto', 'bueno', 'mande',
+  ]);
+  const bareTokens = normalizedText.split(/\s+/);
+  if (bareTokens.length === 1 && !hasProductTrigger(normalizedText)) {
+    const bareCand = cleanEntityCandidate(bareTokens[0]);
+    if (bareCand && bareCand.length >= 2 && !isBlocklisted(bareCand) && !BARE_NOUN_NOPE.has(bareCand)) {
+      try {
+        const categoryRows = await queryCategories(bareCand, businessId);
+        if (categoryRows.length > 0) {
+          return { ...empty, category: bareCand, type: 'category', value: bareCand };
+        }
+      } catch (err) {
+        console.error('[EntityDetector] Error querying categories for bare noun:', err.message);
+      }
+      try {
+        const productRows = await queryProducts(bareCand, businessId);
+        if (productRows.length > 0) {
+          return { ...empty, product: bareCand, type: 'product', value: bareCand, _rows: productRows };
+        }
+      } catch (err) {
+        console.error('[EntityDetector] Error querying products for bare noun:', err.message);
+      }
     }
   }
 

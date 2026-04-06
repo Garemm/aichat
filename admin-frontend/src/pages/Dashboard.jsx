@@ -13,7 +13,7 @@ import TopProductsChart from '../components/ui/TopProductsChart';
 const getChatUrl = (businessId) => {
   const origin =
     import.meta.env.VITE_CHAT_BASE_URL ??
-    `${window.location.protocol}//${window.location.hostname}:5173`;
+`${window.location.protocol}//${window.location.hostname}:5173`;
   return `${origin}/chat/${businessId}`;
 };
 

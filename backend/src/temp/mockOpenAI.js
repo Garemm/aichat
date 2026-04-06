@@ -31,11 +31,12 @@ function getMockOpenAIResponse(userMessage, context = null) {
 
   if (context?.lastIntent) {
     const temas = {
-      horarios:    'horarios de atención',
-      productos:   'productos disponibles',
-      precios:     'precios',
-      promociones: 'promociones activas',
-      ubicacion:   'ubicación del negocio',
+      horarios:           'horarios de atención',
+      productos:          'productos disponibles',
+      precios:            'precios',
+      promociones:        'promociones activas',
+      ubicacion:          'ubicación del negocio',
+      category_selection: 'categorías disponibles',
     };
     const tema = temas[context.lastIntent] || context.lastIntent;
     return (
