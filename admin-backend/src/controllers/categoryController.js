@@ -1,5 +1,5 @@
 // ── Category Controller ───────────────────────────────────────────────────────
-const CategoryModel = require('../models/categoryModel');
+import CategoryModel from '../models/categoryModel.js';
 
 // GET /categories
 const list = async (req, res, next) => {
@@ -53,4 +53,4 @@ const remove = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-module.exports = { list, create, update, remove };
+export { list, create, update, remove };

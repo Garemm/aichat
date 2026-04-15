@@ -19,9 +19,9 @@
  *   e.g. [{ value: "queso" }, { value: "pollo" }] → products with BOTH.
  */
 
-const db  = require('../config/database');
-const { wordVariants } = require('./normalize');
-const { isMaterial } = require('./attributeExtractor');
+import db from '../config/database.js';
+import { wordVariants } from './normalize.js';
+import { isMaterial } from './attributeExtractor.js';
 
 /** Maximum results to return per attribute search. */
 const ATTR_SEARCH_LIMIT = 20;
@@ -284,6 +284,29 @@ async function searchByCompoundQuery({ entity, attribute, fullPhrase }, business
     if (result.rows.length > 0) return { rows: result.rows, strategy: 'entity+attribute' };
   }
 
+  // ── Layer 2c: base-noun + attribute ─────────────────────────────────────
+  // Activated when entity is multi-word (e.g. "hamburguesa doble") and Layer 2
+  // found nothing. Strips adjective/modifier words and retries with just the
+  // first meaningful noun ("hamburguesa") + attribute.
+  // Prevents "hamburguesa doble + queso" from leaking into attribute-only results
+  // that include unrelated products (pizza con queso, tacos con queso, etc.).
+  if (/\s/.test(entity)) {
+    const PREP_ART = new Set(['de', 'del', 'con', 'sin', 'al', 'a', 'en', 'el', 'la', 'los', 'las', 'un', 'una']);
+    const baseNoun = entity.split(/\s+/).find((w) => !PREP_ART.has(w)) || entity.split(/\s+/)[0];
+    if (baseNoun !== entity) {
+      const baseClause    = buildTermClause(baseNoun, 2);
+      const attrClause2c  = buildTermClause(attribute, baseClause.nextIndex);
+      const params2c = [businessId, ...baseClause.params, ...attrClause2c.params];
+      const result2c = await db.query(
+        `${PRODUCT_SELECT} WHERE p.business_id = $1 ` +
+        `AND ${baseClause.clause} AND ${attrClause2c.clause} ` +
+        `ORDER BY p.name ASC LIMIT ${ATTR_SEARCH_LIMIT}`,
+        params2c
+      );
+      if (result2c.rows.length > 0) return { rows: result2c.rows, strategy: 'base+attribute' };
+    }
+  }
+
   // ── Layer 2b: attribute-only with word boundary ───────────────────────────
   // Activated ONLY when the attribute is NOT a material word.
   //
@@ -453,11 +476,11 @@ function formatCompoundQueryResponse(compound, rows, strategy) {
     return `Lo siento, no encontré productos relacionados con "${label}". ¿Quieres ver el catálogo completo o buscar algo diferente?`;
   }
 
-  const fallbackNote =
+  const prefix =
     strategy === 'entity-only'
-      ? ` No encontré "${compound.fullPhrase}" exactamente, pero aquí tienes opciones de "${compound.entity}".`
+      ? `No encontré "${compound.fullPhrase}" exactamente, pero aquí tienes opciones de "${compound.entity}": `
       : strategy === 'attribute-only'
-      ? ` No encontré "${compound.entity}" específicamente, pero te muestro opciones con "${compound.attribute}".`
+      ? `No encontré "${compound.entity}" específicamente, pero te muestro opciones con "${compound.attribute}": `
       : '';
 
   const items   = _buildVoiceList(rows);
@@ -465,12 +488,18 @@ function formatCompoundQueryResponse(compound, rows, strategy) {
   const listed  = _enumList(items);
 
   if (rows.length === 1) {
-    return `Sí 😊, tenemos ${listed}.${fallbackNote} ¿Te interesa o buscas algo más?`;
+    return prefix
+      ? `${prefix}${listed}. ¿Te interesa o buscas algo más?`
+      : `Sí 😊, tenemos ${listed}. ¿Te interesa o buscas algo más?`;
   }
   if (hasMore) {
-    return `Sí 😊, tenemos varias opciones con ${label}, como ${listed}, entre otras.${fallbackNote} Si buscas algo en específico, dime y te ayudo.`;
+    return prefix
+      ? `${prefix}${listed}, entre otras. Si buscas algo en específico, dime y te ayudo.`
+      : `Sí 😊, tenemos varias opciones con ${label}, como ${listed}, entre otras. Si buscas algo en específico, dime y te ayudo.`;
   }
-  return `Sí 😊, tenemos varias opciones con ${label}: ${listed}.${fallbackNote} ¿Cuál te interesa?`;
+  return prefix
+    ? `${prefix}${listed}. ¿Cuál te interesa?`
+    : `Sí 😊, tenemos varias opciones con ${label}: ${listed}. ¿Cuál te interesa?`;
 }
 
 // ─── Response formatter ───────────────────────────────────────────────────────
@@ -508,7 +537,7 @@ function formatAttributeResponse(attributes, rows, strategy = 'AND') {
   return `Sí 😊, tenemos ${rows.length} opciones con ${label}: ${listed}.${strategyNote} ¿Cuál te interesa?`;
 }
 
-module.exports = {
+export {
   searchByAttribute,
   searchByAttributes,
   searchByCompoundQuery,

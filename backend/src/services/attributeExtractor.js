@@ -20,7 +20,7 @@
  *   - Works on already-normalized text (lowercase, no accents)
  */
 
-const { normalize } = require('./normalize');
+import { normalize } from './normalize.js';
 
 // ─── Measure detection ────────────────────────────────────────────────────────
 
@@ -87,9 +87,10 @@ function isMaterial(candidate) {
  *
  * @param {string} value     Normalized attribute value
  * @param {string} [hint]    Preposition that triggered extraction ("con"|"para"|"de"|"que tenga")
- * @returns {'measure'|'material'|'use'|'feature'|'ingredient'}
+ * @returns {'measure'|'material'|'use'|'feature'|'ingredient'|'price_filter'}
  */
 function classifyAttributeType(value, hint) {
+  if (hint === 'price_filter') return 'price_filter';
   if (isMeasure(value)) return 'measure';
   // "para" always signals intended USE, even if the word is also a material
   if (hint === 'para') return 'use';
@@ -115,12 +116,22 @@ const ATTRIBUTE_PATTERNS = [
   { pattern: /\bque\s+teng[ao][n]?\s+(?<attr>[\wñ]+(?:\s+[\wñ]+){0,4})/, hint: 'que tenga' },
   // "algo con X" / "productos con X" / "con X"
   { pattern: /\bcon\s+(?<attr>[\wñ]+(?:\s+[\wñ]+){0,4})/, hint: 'con' },
+  // "algo picante" / "algo dulce" / "algo frio" — bare adjective after "algo"
+  // Runs after "que tenga" and "con" so "algo que tenga X" / "algo con X" are handled first.
+  // Negative lookahead skips prepositions (para/de/con/que/sin) so they fall through
+  // to their own dedicated patterns and get the correct attributeType (e.g. "use" for para).
+  { pattern: /\balgo\s+(?!(?:con|para|de|que|sin)\b)(?<attr>[\wñ]+(?:\s+[\wñ]+){0,3})/, hint: 'con' },
   // "para X" — after trigger words or standalone
   { pattern: /\bpara\s+(?<attr>[\wñ]+(?:\s+[\wñ]+){0,3})/, hint: 'para' },
   // "de X metros/cm/mm...etc" — measure only (number + unit)
   { pattern: /\bde\s+(?<attr>\d+(?:[.,]\d+)?\s+[\wñ]+)/, hint: 'de' },
   // "de X" — after "tornillos de madera", "cables de cobre" (not standalone 'de')
   { pattern: /\bde\s+(?<attr>[\wñ]+(?:\s+[\wñ]+){0,3})/, hint: 'de' },
+  // price-filter adjectives at end of message:
+  //   "dame opciones baratas" → { value: 'baratas', type: 'price_filter' }
+  //   "algo más barato" / "lo más económico"
+  // Lower priority — only reached when no other ATTRIBUTE_PATTERNS matched.
+  { pattern: /\b(?<attr>(?:m[aá]s\s+|lo\s+m[aá]s\s+)?(?:barat[ao]s?|econ[oó]mic[ao]s?|accesibles?))\s*$/, hint: 'price_filter' },
 ];
 
 /**
@@ -185,11 +196,19 @@ function isAttributeQuery(normalizedText) {
   if (ATTRIBUTE_TRIGGER_RE.test(normalizedText)) return true;
 
   // Class 2a: "NOUN para NOUN" structural pattern
-  // Matches when "para" is preceded AND followed by a word (not at sentence start)
-  if (/\w+\s+para\s+\w/.test(normalizedText)) return true;
+  // Only fires when the "para" phrase appears at or near the START of the sentence
+  // (after optional short lead-in words). This prevents false positives when "para"
+  // is embedded inside a longer price/info query about a service or product whose
+  // NAME contains "para" — e.g. "que precio tiene la renta de salon para eventos"
+  // should NOT be treated as an attribute query for "eventos".
+  // Anchor: the para-phrase must be within the first ~4 tokens.
+  if (/^(?:(?:busco|quiero|necesito|hay|tiene[sn]?|tienen|dame)\s+)?(?:[\wñ]+\s+){0,2}[\wñ]+\s+para\s+\w/.test(normalizedText)) return true;
 
   // Class 2b: "de NUMBER UNIT" measure pattern ("de 2 metros", "de 10 mm")
   if (/\bde\s+\d+(?:[.,]\d+)?\s+\w/.test(normalizedText)) return true;
+
+  // Class 3: price-filter adjectives ("algo barato", "dame opciones baratas", "lo más económico")
+  if (/\b(?:m[aá]s\s+)?(?:barat[ao]s?|econ[oó]mic[ao]s?|accesibles?)\b/.test(normalizedText)) return true;
 
   return false;
 }
@@ -199,7 +218,7 @@ function isAttributeQuery(normalizedText) {
 /**
  * @typedef {Object} ExtractedAttribute
  * @property {string} value  - Normalized attribute value (e.g. "queso", "2 metros")
- * @property {'measure'|'material'|'use'|'feature'} type  - Semantic type
+ * @property {'measure'|'material'|'use'|'feature'|'price_filter'} type  - Semantic type
  */
 
 /**
@@ -276,10 +295,21 @@ function extractCompoundQuery(message) {
   // Strip leading trigger words and optional article to expose the core phrase
   const stripped = text.replace(COMPOUND_TRIGGER_STRIP_RE, '').trim();
 
-  // Match: 1-3 entity words + "de" + 1-3 attribute words, with optional trailing "?"
-  const match = stripped.match(
+  // Try "entity DE attribute" first (e.g. "tornillos de madera", "carne de res")
+  let match = stripped.match(
     /^(?<entity>[\wñ]+(?:\s+[\wñ]+){0,2})\s+de\s+(?<attribute>[\wñ]+(?:\s+[\wñ]+){0,3})\s*\??$/
   );
+  let separator = 'de';
+
+  // Fallback: "entity CON attribute" — explicit product + ingredient/feature
+  // e.g. "hamburguesa con queso", "pizza con extra queso", "agua con gas"
+  // Only when the "de" pattern does not match, to avoid false positives.
+  if (!match?.groups) {
+    match = stripped.match(
+      /^(?<entity>[\wñ]+(?:\s+[\wñ]+){0,2})\s+con\s+(?<attribute>[\wñ]+(?:\s+[\wñ]+){0,3})\s*\??$/
+    );
+    separator = 'con';
+  }
 
   if (!match?.groups) return null;
 
@@ -295,7 +325,7 @@ function extractCompoundQuery(message) {
   // Attribute must not be a numeric measure — those go through the existing measure path
   if (isMeasure(attribute)) return null;
 
-  const fullPhrase = `${entity} de ${attribute}`;
+  const fullPhrase = `${entity} ${separator} ${attribute}`;
   return { entity, attribute, fullPhrase };
 }
 
@@ -345,7 +375,7 @@ function extractCategoryAttributeQuery(message) {
   return { categoryWord, attribute };
 }
 
-module.exports = {
+export {
   extractAttribute,
   extractCompoundQuery,
   extractCategoryAttributeQuery,

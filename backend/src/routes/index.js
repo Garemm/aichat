@@ -7,15 +7,17 @@
  * Convention: /api/<resource>
  */
 
-const { Router } = require('express');
-const messageRoutes  = require('./messageRoutes');
-const businessRoutes = require('./businessRoutes');
-const { transcribe } = require('../controllers/transcribeController');
+import { Router } from 'express';
+import messageRoutes from './messageRoutes.js';
+import businessRoutes from './businessRoutes.js';
+import pedidoRoutes from './pedidoRoutes.js';
+import { transcribe } from '../controllers/transcribeController.js';
 
 const router = Router();
 
 router.use('/messages', messageRoutes);
 router.use('/business', businessRoutes);
+router.use('/pedidos',  pedidoRoutes);
 
 // ── Audio transcription (MediaRecorder fallback for mobile browsers) ──────
 router.post('/transcribe', transcribe);
@@ -24,4 +26,4 @@ router.post('/transcribe', transcribe);
 // router.use('/rooms',   roomRoutes);
 // router.use('/users',   userRoutes);
 
-module.exports = router;
+export default router;

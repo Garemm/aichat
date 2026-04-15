@@ -1,25 +1,36 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { register } from '../services/api';
+import { marked } from 'marked';
+import { register, getBusinessTypes, getLegalDocument } from '../services/api';
 
 const INITIAL = {
   name: '', category: '', description: '', city: '', email: '',
   phone: '', webpage_link: '', username: '', password: '', confirmPassword: '',
 };
 
-const CATEGORIES = [
-  { value: 'restaurant', label: 'Restaurante' },
-  { value: 'hardware',   label: 'Ferretería / Hardware' },
-  { value: 'stationery', label: 'Papelería' },
-];
-
 const Register = () => {
   const navigate = useNavigate();
-  const [form, setForm]       = useState(INITIAL);
-  const [errors, setErrors]   = useState({});
+  const [form, setForm]           = useState(INITIAL);
+  const [errors, setErrors]       = useState({});
   const [serverErr, setServerErr] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [success, setSuccess] = useState(false);
+  const [loading, setLoading]     = useState(false);
+  const [success, setSuccess]     = useState(false);
+  const [categories, setCategories]   = useState([]);
+  const [catLoading, setCatLoading]   = useState(true);
+  const [acceptedPrivacy, setAcceptedPrivacy] = useState(false);
+  const [acceptedTerms, setAcceptedTerms]     = useState(false);
+  const [activeLegal, setActiveLegal] = useState('');
+  const [legalOpen, setLegalOpen] = useState(false);
+  const [legalLoading, setLegalLoading] = useState(false);
+  const [legalError, setLegalError] = useState('');
+  const [legalHtml, setLegalHtml] = useState('');
+
+  useEffect(() => {
+    getBusinessTypes()
+      .then((data) => setCategories(Array.isArray(data) ? data : []))
+      .catch(() => {})
+      .finally(() => setCatLoading(false));
+  }, []);
 
   const set = (field) => (e) =>
     setForm((f) => ({ ...f, [field]: e.target.value }));
@@ -40,8 +51,35 @@ const Register = () => {
     if (!form.confirmPassword) e.confirmPassword = 'Requerido';
     else if (form.password !== form.confirmPassword)
                                e.confirmPassword = 'Las contraseñas no coinciden';
+    if (!acceptedPrivacy)      e.acceptedPrivacy = 'Debes leer y aceptar el aviso de privacidad';
+    if (!acceptedTerms)        e.acceptedTerms   = 'Debes aceptar los términos y condiciones';
     return e;
   };
+
+  const openLegalModal = async (type) => {
+    setActiveLegal(type);
+    setLegalOpen(true);
+    setLegalLoading(true);
+    setLegalError('');
+    setLegalHtml('');
+
+    try {
+      const content = await getLegalDocument(type);
+      setLegalHtml(marked.parse(content || ''));
+    } catch (err) {
+      setLegalError(err.message || 'No se pudo cargar el documento');
+    } finally {
+      setLegalLoading(false);
+    }
+  };
+
+  const closeLegalModal = () => {
+    setLegalOpen(false);
+    setLegalError('');
+    setLegalLoading(false);
+  };
+
+  const isFormValid = acceptedPrivacy && acceptedTerms;
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -80,7 +118,8 @@ const Register = () => {
         {/* Header */}
         <div className="register-card__header">
           <h1>Crear cuenta</h1>
-          <p>Registra tu negocio y empieza a usar el panel</p>
+          <p>Tu negocio automatizado en tres pasos.</p>
+          <p>Registra tu empresa, administra tus productos y activa tu propio chatbot inteligente hoy mismo!</p>
         </div>
 
         {serverErr && <div className="register-alert">{serverErr}</div>}
@@ -107,10 +146,13 @@ const Register = () => {
                 value={form.category}
                 onChange={set('category')}
                 className={errors.category ? 'input-error' : ''}
+                disabled={catLoading}
               >
-                <option value="">Seleccionar…</option>
-                {CATEGORIES.map((c) => (
-                  <option key={c.value} value={c.value}>{c.label}</option>
+                <option value="">{catLoading ? 'Cargando…' : 'Seleccionar…'}</option>
+                {categories.map((c) => (
+                  <option key={c.id} value={String(c.id)}>
+                    {c.name.charAt(0).toUpperCase() + c.name.slice(1)}
+                  </option>
                 ))}
               </select>
             </Field>
@@ -205,10 +247,56 @@ const Register = () => {
           </div>
         </div>
 
+        <div className={`register-consent${errors.acceptedPrivacy || errors.acceptedTerms ? ' register-consent--err' : ''}`}>
+          <label className="register-consent__item">
+            <input
+              type="checkbox"
+              checked={acceptedPrivacy}
+              onChange={(e) => setAcceptedPrivacy(e.target.checked)}
+              required
+            />
+            <span>
+              Leí el{' '}
+              <button
+                type="button"
+                className="register-consent__link"
+                onClick={() => openLegalModal('privacy')}
+              >
+                aviso de privacidad
+              </button>
+            </span>
+          </label>
+
+          <label className="register-consent__item">
+            <input
+              type="checkbox"
+              checked={acceptedTerms}
+              onChange={(e) => setAcceptedTerms(e.target.checked)}
+              required
+            />
+            <span>
+              Acepto los{' '}
+              <button
+                type="button"
+                className="register-consent__link"
+                onClick={() => openLegalModal('terms')}
+              >
+                términos y condiciones
+              </button>
+            </span>
+          </label>
+
+          {(errors.acceptedPrivacy || errors.acceptedTerms) && (
+            <span className="register-consent__err">
+              Debes aceptar ambos documentos para crear tu cuenta.
+            </span>
+          )}
+        </div>
+
         <button
           type="submit"
           className="btn btn--primary register-submit"
-          disabled={loading}
+          disabled={loading || !isFormValid}
         >
           {loading ? (
             <span className="register-spinner" />
@@ -222,6 +310,16 @@ const Register = () => {
           <Link to="/login" className="register-link">Iniciar sesión</Link>
         </p>
       </form>
+
+      {legalOpen && (
+        <LegalModal
+          title={activeLegal === 'privacy' ? 'Aviso de privacidad' : 'Términos y condiciones'}
+          loading={legalLoading}
+          error={legalError}
+          html={legalHtml}
+          onClose={closeLegalModal}
+        />
+      )}
     </div>
   );
 };
@@ -233,6 +331,27 @@ const Field = ({ label, error, children }) => (
     {children}
     {error && <span className="register-field__err">{error}</span>}
   </label>
+);
+
+const LegalModal = ({ title, loading, error, html, onClose }) => (
+  <div className="legal-modal-overlay" role="dialog" aria-modal="true" aria-label={title}>
+    <div className="legal-modal">
+      <div className="legal-modal__head">
+        <h3>{title}</h3>
+        <button type="button" className="legal-modal__close" onClick={onClose} aria-label="Cerrar">
+          Cerrar
+        </button>
+      </div>
+
+      <div className="legal-modal__body">
+        {loading && <p className="legal-modal__state">Cargando documento...</p>}
+        {!loading && error && <p className="legal-modal__state legal-modal__state--err">{error}</p>}
+        {!loading && !error && (
+          <div className="legal-modal__content" dangerouslySetInnerHTML={{ __html: html }} />
+        )}
+      </div>
+    </div>
+  </div>
 );
 
 export default Register;

@@ -1,5 +1,5 @@
 // ── Promotion Controller ──────────────────────────────────────────────────────
-const PromotionModel = require('../models/promotionModel');
+import PromotionModel from '../models/promotionModel.js';
 
 const list = async (req, res, next) => {
   try {
@@ -39,4 +39,4 @@ const remove = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-module.exports = { list, getById, create, update, remove };
+export { list, getById, create, update, remove };

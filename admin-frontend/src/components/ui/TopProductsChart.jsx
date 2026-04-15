@@ -26,7 +26,7 @@ const COLOURS = [
 ];
 
 // ── Polling interval (ms) ─────────────────────────────────────────────────────
-const POLL_MS = 20_000; // 20 seconds
+const POLL_MS = 10_000; // 10 seconds
 
 // ── Component ──────────────────────────────────────────────────────────────────
 const TopProductsChart = () => {
@@ -67,7 +67,7 @@ const TopProductsChart = () => {
     <div className="top-products-chart">
       <div className="top-products-chart__header">
         <h3 className="top-products-chart__title">Productos más consultados</h3>
-        <span className="top-products-chart__sub">Esta semana · se actualiza automáticamente</span>
+        <span className="top-products-chart__sub">Top 10 · se actualiza automáticamente</span>
       </div>
 
       {error ? (
@@ -97,7 +97,7 @@ const TopProductsChart = () => {
               width={32}
             />
             <Tooltip content={<CustomTooltip />} cursor={{ fill: 'rgba(99,102,241,0.06)' }} />
-            <Bar dataKey="query_count" radius={[6, 6, 0, 0]} maxBarSize={52}>
+            <Bar dataKey="count" radius={[6, 6, 0, 0]} maxBarSize={52}>
               {data.map((_, i) => (
                 <Cell key={i} fill={COLOURS[i % COLOURS.length]} />
               ))}

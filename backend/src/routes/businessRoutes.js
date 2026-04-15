@@ -4,8 +4,8 @@
  * REST endpoints for business (tenant) data.
  * Used by the frontend BusinessSelector to list available tenants.
  */
-const { Router } = require('express');
-const BusinessModel = require('../models/businessModel');
+import { Router } from 'express';
+import BusinessModel from '../models/businessModel.js';
 
 const router = Router();
 
@@ -19,4 +19,15 @@ router.get('/', async (req, res, next) => {
   }
 });
 
-module.exports = router;
+// GET /api/business/by-uuid/:chatUuid — Resolves a public chat UUID to business info
+router.get('/by-uuid/:chatUuid', async (req, res, next) => {
+  try {
+    const business = await BusinessModel.getByUuid(req.params.chatUuid);
+    if (!business) return res.status(404).json({ success: false, error: 'Business not found' });
+    res.json({ success: true, data: business });
+  } catch (err) {
+    next(err);
+  }
+});
+
+export default router;

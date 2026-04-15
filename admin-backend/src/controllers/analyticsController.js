@@ -1,84 +1,95 @@
-'use strict';
-
 /**
  * analyticsController.js
  *
  * GET /analytics/top-products/:business_id
- * Returns the top 10 most-queried products for the requesting business,
- * aggregated over the current ISO week (Mon–Sun).
+ *   Top 10 products by COUNT(*) of individual log records.
  *
- * Security: verifies that the authenticated admin owns the requested business_id.
+ * GET /analytics/traffic-by-hour/:business_id
+ *   Query volume grouped by hour of day (0–23), COUNT(*) of individual
+ *   log records.  Returns all 24 slots (0 for hours with no data).
  *
- * Caching: simple in-process TTL cache (5 minutes) keyed by business_id.
- * This avoids hammering PostgreSQL on every dashboard poll cycle.
+ * Security: multi-tenant guard — admin may only query their own business_id.
+ * No server-side cache — queries run directly against the indexed table so
+ * the frontend 10-second poll always returns fresh data.
  */
 
-const db = require('../config/database');
+import db from '../config/database.js';
 
-// ── In-process cache (business_id → { data, expiresAt }) ─────────────────────
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
-const _cache = new Map();
-
-function _getCached(key) {
-  const entry = _cache.get(key);
-  if (!entry) return null;
-  if (entry.expiresAt < Date.now()) { _cache.delete(key); return null; }
-  return entry.data;
-}
-
-function _setCache(key, data) {
-  _cache.set(key, { data, expiresAt: Date.now() + CACHE_TTL_MS });
-}
-
-// ── Controller ────────────────────────────────────────────────────────────────
-
-/**
- * GET /analytics/top-products/:business_id
- *
- * Returns top 10 products by total query_count in the current week.
- * Response shape: { data: [{ product_id, name, query_count }] }
- */
-const getTopProducts = async (req, res) => {
-  const adminBusinessId = req.businessId;            // set by requireAuth middleware
-  const requestedId     = parseInt(req.params.business_id, 10);
-
-  // Multi-tenant guard: admin may only see their own business data
-  if (!adminBusinessId || adminBusinessId !== requestedId) {
-    return res.status(403).json({ error: 'Acceso denegado' });
+// ── Tenant guard helper ────────────────────────────────────────────────────────
+function _guardTenant(req, res) {
+  const requestedId = parseInt(req.params.business_id, 10);
+  if (!req.businessId || req.businessId !== requestedId) {
+    res.status(403).json({ error: 'Acceso denegado' });
+    return null;
   }
+  return requestedId;
+}
 
-  // Check cache
-  const cached = _getCached(requestedId);
-  if (cached) return res.json({ data: cached });
+// ── GET /analytics/top-products/:business_id ──────────────────────────────────
+// Top 10 products ordered by number of individual log records (COUNT(*)).
+// Response: { data: [{ product_id, name, count }] }
+export const getTopProducts = async (req, res) => {
+  const businessId = _guardTenant(req, res);
+  if (businessId === null) return;
 
   try {
-    const result = await db.query(
+    const { rows } = await db.query(
       `SELECT
          pql.product_id,
          p.name,
-         SUM(pql.query_count) AS query_count
+         COUNT(*) AS count
        FROM product_query_logs pql
        JOIN products p ON p.id = pql.product_id
        WHERE pql.business_id = $1
-         AND pql.query_date >= date_trunc('week', CURRENT_DATE)
        GROUP BY pql.product_id, p.name
-       ORDER BY query_count DESC
+       ORDER BY count DESC
        LIMIT 10`,
-      [requestedId]
+      [businessId]
     );
 
-    const rows = result.rows.map((r) => ({
-      product_id:  r.product_id,
-      name:        r.name,
-      query_count: parseInt(r.query_count, 10),
+    const data = rows.map((r) => ({
+      product_id: r.product_id,
+      name:       r.name,
+      count:      parseInt(r.count, 10),
     }));
 
-    _setCache(requestedId, rows);
-    return res.json({ data: rows });
+    return res.json({ data });
   } catch (err) {
-    console.error('[Analytics] Error fetching top products:', err.message);
+    console.error('[Analytics] getTopProducts error:', err.message);
     return res.status(500).json({ error: 'Error al obtener estadísticas' });
   }
 };
 
-module.exports = { getTopProducts };
+// ── GET /analytics/traffic-by-hour/:business_id ───────────────────────────────
+// Counts log records grouped by hour of day (0–23) using created_at.
+// Always returns all 24 hours; hours with no data have count = 0.
+// Response: { data: [{ hour, count }] }   (24 entries, sorted by hour asc)
+export const getTrafficByHour = async (req, res) => {
+  const businessId = _guardTenant(req, res);
+  if (businessId === null) return;
+
+  try {
+    const { rows } = await db.query(
+      `SELECT
+         EXTRACT(HOUR FROM created_at)::int AS hour,
+         COUNT(*) AS count
+       FROM product_query_logs
+       WHERE business_id = $1
+       GROUP BY hour
+       ORDER BY hour`,
+      [businessId]
+    );
+
+    // Fill in all 24 slots so the chart always renders a complete axis
+    const byHour = new Map(rows.map((r) => [r.hour, parseInt(r.count, 10)]));
+    const data = Array.from({ length: 24 }, (_, h) => ({
+      hour:  h,
+      count: byHour.get(h) ?? 0,
+    }));
+
+    return res.json({ data });
+  } catch (err) {
+    console.error('[Analytics] getTrafficByHour error:', err.message);
+    return res.status(500).json({ error: 'Error al obtener estadísticas de tráfico' });
+  }
+};

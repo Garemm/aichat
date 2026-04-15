@@ -1,5 +1,5 @@
 // ── JWT helpers ───────────────────────────────────────────────────────────────
-const jwt = require('jsonwebtoken');
+import jwt from 'jsonwebtoken';
 
 const ACCESS_SECRET  = process.env.JWT_SECRET;
 const REFRESH_SECRET = process.env.JWT_REFRESH_SECRET;
@@ -51,7 +51,7 @@ const REFRESH_COOKIE_OPTS = {
   path:     '/admin',
 };
 
-module.exports = {
+export {
   signAccess,
   signRefresh,
   verifyAccess,

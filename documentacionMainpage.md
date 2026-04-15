@@ -1,6 +1,6 @@
-# ChatLocal AI — Documentación de la Landing Page (mainPage)
+# hayChat Business — Documentación de la Landing Page (mainPage)
 
-> Creado: 4 de abril de 2026
+> Última actualización: 15 de abril de 2026
 > Estado: desarrollo activo
 > Archivo: `documentacionMainpage.md`
 
@@ -8,9 +8,16 @@
 
 ## Resumen del proyecto
 
-**mainPage** es la landing page de marketing de **ChatLocal AI**, el producto SaaS de chatbot híbrido para negocios locales. Es un sitio de una sola página (SPA sin router) con anclas de navegación, construido con React + Vite + Tailwind CSS + Framer Motion. El objetivo es presentar el producto, sus funcionalidades, planes de precio y guiar al visitante a registrarse (panel admin) o probar el chat genérico de demostración.
+**mainPage** es la landing page de marketing de **hayChat Business**, el producto SaaS de chatbot híbrido para negocios locales. Es un sitio de una sola página (SPA sin router) con anclas de navegación, construido con React + Vite + Tailwind CSS + Framer Motion.
 
-Todo el contenido está en **español** (excepto los labels de navegación que están en inglés por decisión de diseño — Features, Demo, How it works, Pricing).
+El objetivo es presentar el producto, sus funcionalidades, planes de precio y guiar al visitante a registrarse (panel admin) o probar el chat genérico de demostración. Todo el contenido está en **español**.
+
+**Notas importantes sobre el estado actual:**
+- Los CTAs "Registrar mi negocio" (Hero y CTA) apuntan a `href="#"` — no tienen destino real aún
+- Los links del Footer y redes sociales también apuntan a `href="#"`
+- El logo en Navbar tiene un typo: "hayChat **Businesss**" (triple `s`); el Footer dice "hayChat Business" correctamente
+- `useCursorGlow` y `useScrollReveal` están definidos pero no conectados a ningún componente visible
+- Los precios están en MXN (mercado objetivo: México)
 
 ---
 
@@ -26,11 +33,12 @@ Todo el contenido está en **español** (excepto los labels de navegación que e
    - 5.3 [TrustBar](#53-trustbar)
    - 5.4 [Features](#54-features)
    - 5.5 [Demo](#55-demo)
-   - 5.6 [UseCases](#56-usecases)
-   - 5.7 [HowItWorks](#57-howitworks)
-   - 5.8 [Pricing](#58-pricing)
-   - 5.9 [CTA](#59-cta)
-   - 5.10 [Footer](#510-footer)
+   - 5.6 [ControlCenter](#56-controlcenter)
+   - 5.7 [UseCases](#57-usecases)
+   - 5.8 [HowItWorks](#58-howitworks)
+   - 5.9 [Pricing](#59-pricing)
+   - 5.10 [CTA](#510-cta)
+   - 5.11 [Footer](#511-footer)
 6. [Componentes UI reutilizables](#6-componentes-ui-reutilizables)
 7. [Hooks personalizados](#7-hooks-personalizados)
 8. [Sistema de diseño](#8-sistema-de-diseño)
@@ -42,7 +50,7 @@ Todo el contenido está en **español** (excepto los labels de navegación que e
 
 ```
 mainPage/
-├── index.html                    ← HTML raíz: dark class, meta description, fuentes, viewport
+├── index.html                    ← HTML raíz: meta description, fuentes, viewport
 ├── package.json
 ├── vite.config.js                ← Puerto 5172, plugin react
 └── src/
@@ -54,16 +62,17 @@ mainPage/
     │   ├── Hero.jsx              ← Sección principal con parallax y animaciones stagger
     │   ├── TrustBar.jsx          ← Banda de prueba social / logotipos
     │   ├── Features.jsx          ← Grid de 6 tarjetas de funcionalidades
-    │   ├── Demo.jsx              ← Sección demo interactiva del chatbot
-    │   ├── UseCases.jsx          ← Casos de uso por tipo de negocio
+    │   ├── Demo.jsx              ← Demo animada de chat + panel admin sincronizado
+    │   ├── ControlCenter.jsx     ← ★ Panel admin mockup con switch Dashboard/Pedidos (nuevo)
+    │   ├── UseCases.jsx          ← 4 casos de uso por tipo de negocio
     │   ├── HowItWorks.jsx        ← Proceso de 3 pasos con línea animada
-    │   ├── Pricing.jsx           ← Tres planes con toggle mensual/anual
+    │   ├── Pricing.jsx           ← 5 planes de suscripción
     │   ├── CTA.jsx               ← Sección final de llamada a la acción
     │   ├── Footer.jsx            ← Footer con columnas de links y redes sociales
     │   └── ui/
-    │       ├── Button.jsx        ← Componente de botón (primary / secondary / outline)
+    │       ├── Button.jsx        ← primary / secondary / ghost / outline
     │       ├── Card.jsx          ← Contenedor de tarjeta genérico
-    │       └── Section.jsx       ← Wrapper de sección + SectionHeader con reveal animation
+    │       └── Section.jsx       ← Wrapper de sección + SectionHeader con reveal
     └── hooks/
         ├── useCursorGlow.js      ← Efecto de resplandor que sigue al cursor (Framer Motion spring)
         └── useScrollReveal.js    ← Animaciones de entrada al hacer scroll
@@ -108,31 +117,42 @@ Puerto fijo `5172`. No hay configures de proxy (la landing no hace llamadas al b
 <html lang="en" class="dark">
 ```
 
-- El atributo `dark` en `<html>` activa el tema oscuro de Tailwind desde el inicio (sin parpadeo de tema claro).
-- Fuentes cargadas desde Google Fonts: **Inter** (400–900) para UI + **JetBrains Mono** (400–500) para bloques de código.
-- Meta description: `"ChatLocal AI — Chatbot híbrido inteligente para negocios locales."`
-- Título: `"ChatLocal AI — Chatbot Inteligente para Negocios Locales"`
+El atributo `dark` en `<html>` NO está activo en la versión actual (el tema es lila/púrpura claro, NO modo oscuro). El `index.html` usa `lang="en"` pero todo el contenido está en español.
 
 ---
 
 ## 4. Arquitectura de la página
 
-`App.jsx` es el único componente con estado propio (cursor glow a través de `useCursorGlow()`). Renderiza todos los componentes de sección en orden vertical. No hay rutas ni pages — todo es una sola columna lineal.
+`App.jsx` renderiza todos los componentes de sección en orden vertical. No hay rutas ni pages — todo es una sola columna lineal. El hook `useCursorGlow` está definido pero **no está activo** en la versión actual.
+
+**Orden de secciones (11 componentes):**
+
+| # | Componente | Áncora | Propósito |
+|---|-----------|--------|----------|
+| 1 | `<Navbar />` | — | Navegación fija superior |
+| 2 | `<Hero />` | — | Primera sección, headline + chat mockup |
+| 3 | `<TrustBar />` | — | Logos de rubros + 4 stats clave |
+| 4 | `<Features />` | `#features` | 6 cards de funcionalidades técnicas |
+| 5 | `<Demo />` | `#demo` | Demo animada: chat + panel admin sincronizado |
+| 6 | `<ControlCenter />` | `#control-center` | Mockup del panel admin con auto-switch cada 4.8 s |
+| 7 | `<UseCases />` | `#use-cases` | 4 casos de uso por tipo de negocio |
+| 8 | `<HowItWorks />` | `#how-it-works` | 3 pasos para empezar |
+| 9 | `<Pricing />` | `#pricing` | 5 planes de suscripción |
+| 10 | `<CTA />` | — | Llamada a la acción final |
+| 11 | `<Footer />` | — | Links y copyright |
 
 ```jsx
 // App.jsx — estructura simplificada
 export default function App() {
-  const { x, y, visible } = useCursorGlow()
-
   return (
     <div className="relative min-h-screen bg-background text-foreground overflow-x-hidden">
-      <motion.div className="cursor-glow" style={{ left: x, top: y, opacity: visible ? 1 : 0 }} />
       <Navbar />
       <main>
         <Hero />
         <TrustBar />
         <Features />
         <Demo />
+        <ControlCenter />
         <UseCases />
         <HowItWorks />
         <Pricing />
@@ -143,8 +163,6 @@ export default function App() {
   )
 }
 ```
-
-El elemento `.cursor-glow` es un blob radial posicionado con `position: fixed` que sigue al cursor via spring animation de Framer Motion.
 
 ---
 
@@ -161,20 +179,13 @@ Barra de navegación fija (`position: fixed`, `z-50`) con efecto glassmorphism a
 - Por encima del fold: fondo completamente transparente
 - Mobile: menú hamburger abre un drawer animado con `AnimatePresence` de Framer Motion
 
-**Links de navegación:**
-
-| Label | Ancla |
-|---|---|
-| Features | `#features` |
-| Demo | `#demo` |
-| How it works | `#how-it-works` |
-| Pricing | `#pricing` |
+**Links de navegación (5 items):** Funcionalidades (`#features`), Demo (`#demo`), Panel Admin (`#control-center`), Casos de uso (`#use-cases`), Precios (`#pricing`)
 
 **CTAs en el header:**
-- `Admin Login` → link a `http://localhost:5174/` (panel admin, abre en nueva pestaña)
-- `Start Free` (botón primario) → `http://localhost:5173/` (chat de demostración, abre en nueva pestaña)
+- `"Inicia sesión"` → `http://localhost:5174/` (admin frontend)
+- `"Prueba chat genérico"` → `http://localhost:5173/` (chat frontend)
 
-**Logo:** "ChatLocal**AI**" con el texto "AI" en color `text-accent`. Ícono SVG personalizado (`NexusIcon`) dentro de un contenedor con borde y glow accent.
+**Logo:** SVG inline `NexusIcon` (cruz de 4 puntos azules). Texto: "hayChat **Businesss**" *(triple `s`, typo en Navbar; Footer dice "Business" correctamente)*.
 
 **Animación de entrada:** `initial={{ y: -20, opacity: 0 }}` → `animate={{ y: 0, opacity: 1 }}` en 500ms.
 
@@ -199,8 +210,8 @@ Sección principal de pantalla completa (`min-h-screen`) con layout de dos colum
 - Badge: `"En desarrollo activo · NLP + IA Híbrida"`
 - Headline: `"Chatbot Inteligente para tu Negocio Local"` (tres líneas con degradados blanco + azul)
 - Subheadline: descripción del producto (NLP + IA generativa como respaldo, siempre preciso)
-- CTAs: botón primario "Empezar gratis" + botón outline con icono Play "Demo interactiva" / "Ver cómo funciona"
-- Trust indicators: N negocios piloto, M categorías, K respuestas resueltas
+- CTAs: "Registrar mi negocio" (`href="#"` **sin destino real aún**) y "Ver demo" (`href="#demo"`)
+- Social proof: 5 avatares con iniciales `R, T, P, F, B`
 
 ---
 
@@ -208,7 +219,11 @@ Sección principal de pantalla completa (`min-h-screen`) con layout de dos colum
 
 **Archivo:** `src/components/TrustBar.jsx`
 
-Franja horizontal de prueba social entre el Hero y el grid de Features. Puede incluir métricas destacadas, logotipos de empresas que usan el producto o badges de tecnología (React, Node.js, PostgreSQL, etc.).
+Franja horizontal de prueba social entre el Hero y el grid de Features.
+
+- Muestra 8 tipos de negocio (Restaurantes, Ferretérías, Papelerías, etc.) con fade-in staggered
+- 4 stats: `< 2s` (tiempo de respuesta), `1600` (tests), `100%` privacidad de voz, `24/7`
+- Nota: el código importa paths SVG de logos externos (Stripe, Vercel, Notion) pero los renderiza como texto plano — vestigio de una versión anterior
 
 ---
 
@@ -239,19 +254,42 @@ Grid de **6 tarjetas** de funcionalidades. Cada tarjeta tiene icono Lucide, tít
 **Archivo:** `src/components/Demo.jsx`
 **Ancla:** `#demo`
 
-Sección de demostración interactiva del chatbot. Puede mostrar un chat simulado con mensajes de ejemplo o incrustar el widget real del chat.
+Demo animada del chatbot con panel admin sincronizado. Completamente autónoma (sin props).
 
----
+- Estado: `visibleMessages[]`, `typing`, `started`, `orderFlow` (objeto con 5 props)
+- Flujo automatizado con **14 `setTimeout`** encadenados (600 ms – 17 700 ms):
+  - 7 mensajes de conversación
+  - Flujo de pedido: acción visible → form → recibo pending → accepted (14.9 s) → ready (17.7 s)
+- Layout: 2 columnas `[1.08fr / 0.92fr]` — chat izquierdo | `<AdminOrdersSync />` derecho
+- Subcomponentes: `DemoMessage`, `AgentAvatar`, `OrderFormPreview`, `OrderReceiptPreview`, `OrderReadyPreview`, `AdminOrdersSync`
+- Botón "Repetir demo" que reinicia todos los timeouts
 
-### 5.6 UseCases
+### 5.6 ControlCenter
+
+**Archivo:** `src/components/ControlCenter.jsx`
+**Áncora:** `#control-center`
+
+Sección nueva que muestra el panel admin como mockup interactivo. Se ubica entre `Demo` y `UseCases`.
+
+- Estado: `activeView` (`'dashboard'` | `'orders'`) — **auto-switch cada 4.8 segundos** con `setInterval`
+- Layout: 2 columnas `[0.92fr / 1.08fr]` — tarjetas descripción | panel mockup
+- Panel mockup tiene sidebar con 4 items (Resumen, Productos, Pedidos, Horarios)
+- `AnimatePresence mode="wait"` para transición entre vistas
+- Subcomponentes: `DashboardPreview`, `OrdersPreview`, `CompactMetric`, `StatTile`
+- CTA: `href="http://localhost:5174/"` → "Ver panel admin"
+
+### 5.7 UseCases
 
 **Archivo:** `src/components/UseCases.jsx`
+**Áncora:** `#use-cases`
 
-Muestra casos de uso del chatbot para distintos tipos de negocios locales: restaurantes, ferreterías, papelerías, spas, etc. Cada caso incluye tipo de negocio, preguntas de ejemplo que el chatbot puede responder y los beneficios clave.
+Grid de **4 casos de uso** para distintos tipos de negocios locales: restaurantes, ferreterías, etc. Cada tarjeta incluye tipo de negocio, descripción, tags y color de acento.
 
----
+- Íconos Lucide: `TrendingUp`, `Layers`, `Headphones`, `Users`
+- Hover: `y: -4` + glow radial + flecha con `opacity: 0 → 100`
+- Subcomponente `<UseCaseCard useCase index />`
 
-### 5.7 HowItWorks
+### 5.8 HowItWorks
 
 **Archivo:** `src/components/HowItWorks.jsx`
 **Ancla:** `#how-it-works`
@@ -270,59 +308,55 @@ Proceso de **3 pasos** en un grid horizontal con línea conectora animada.
 
 ---
 
-### 5.8 Pricing
+### 5.9 Pricing
 
 **Archivo:** `src/components/Pricing.jsx`
 **Ancla:** `#pricing`
 
-Tres planes de precio con toggle mensual/anual (estado React local `yearly`). Al activar annual se muestran precios menores.
+Grid de **5 planes** (sin toggle mensual/anual): `Emprendedor`, `Lite`, `Empresarial`, `Premium` (deshabilitado) y `Custom` (precio personalizado).
 
-| Plan | Precio mensual | Precio anual | Highlighted |
-|---|---|---|---|
-| **Básico** | $29/mo | $23/mo | No |
-| **Pro** | $69/mo | $55/mo | **Sí** (borde accent, badge "Más popular") |
-| **Enterprise** | Contactar | Contactar | No |
+| Plan | Precio | Estado | CTA | Notas |
+|---|---|---|---|---|
+| Emprendedor | $199 MXN/mes | Disponible | Elegir plan | Hasta 20 productos |
+| Lite | $399 MXN/mes | Disponible | Elegir plan | Hasta 500 productos |
+| Empresarial | $499 MXN/mes | Disponible | Elegir plan | **Recomendado** (highlighted) |
+| Premium | $799 MXN/mes | En desarrollo | Próximamente | `disabled: true` |
+| Custom | Personalizado | Futuro | Hablar con ventas | Integraciones a medida |
 
-**Características por plan:**
-
-*Básico:* 1 negocio, chat web, motor NLP, productos/servicios/horarios, contexto básico, soporte por correo.
-
-*Pro (todo lo de Básico +):* Voz STT+TTS, IA generativa con OpenAI RAG, Importación Excel, Contexto multi-turno completo (Redis), Historial de conversaciones, Soporte prioritario.
-
-*Enterprise:* Negocios ilimitados, white-label, IA personalizada, integraciones a medida, infraestructura dedicada, SLA garantizado, Gerente de éxito dedicado.
-
-**CTA por plan:** "Empezar gratis" (Básico y Pro) / "Contactar ventas" (Enterprise).
+**Comportamiento clave:**
+- Layout responsive: `grid-cols-1 md:grid-cols-2 xl:grid-cols-5`
+- Animación de entrada por tarjeta con delay progresivo (`index * 0.1`)
+- Hover vertical: `-6px` para highlighted, `-4px` para las demás
+- Badge superior "Recomendado" solo en plan Empresarial
+- Indicador visual: "Precios en MXN / mes"
 
 ---
 
-### 5.9 CTA
+### 5.10 CTA
 
 **Archivo:** `src/components/CTA.jsx`
 
-Sección final de llamada a la acción antes del footer. Reafirma la propuesta de valor y tiene botones de registro / demo.
+Sección final de conversión con fondo animado y doble llamada a la acción.
 
----
+- Fondo: 2 capas radiales (`motion.div`) con escala/opacidad en loop (6s y 8s)
+- Decoración: 3 líneas horizontales con gradiente violeta de baja opacidad
+- Badge: "Listo para atender en minutos"
+- Headline: "Dale voz a tu negocio hoy" (`text-gradient-white` + `text-gradient-blue`)
+- CTA primario: `Registrar mi negocio` (`href="#"`, sin destino real)
+- CTA secundario: botón `secondary` con texto `Ver demo`
+- Nota de confianza: "Rápido y confiable · Cancela cuando quieras"
 
-### 5.10 Footer
+### 5.11 Footer
 
 **Archivo:** `src/components/Footer.jsx`
 
-Grid de 6 columnas (2 para el branding + 4 para links).
+Footer con marca, enlaces por categoría y barra inferior de estado.
 
-**Columnas de links:**
-
-| Categoría | Links |
-|---|---|
-| Producto | Características, Demo, Precios, Cómo funciona |
-| Empresa | Nosotros, Blog, Contacto |
-| Plataforma | Panel Admin, Importación Excel, API |
-| Legal | Privacidad, Términos de uso |
-
-**Branding:** Logo "ChatLocal**AI**" con ícono SVG inline + descripción "Chatbot híbrido inteligente para negocios locales. NLP determinísta + IA generativa con contexto real de tu negocio."
-
-**Redes sociales:** Twitter, GitHub, LinkedIn, Discord (íconos Lucide, todos con href `#` en dev).
-
-**Sub-footer:** copyright © ChatLocal AI + "Hecho con ❤️ para negocios locales" + badges "NLP · IA · Real-time".
+- Grid principal: `grid-cols-2 md:grid-cols-6`
+- Columnas de links: `Producto`, `Empresa`, `Plataforma`, `Legal` (todos `href="#"`)
+- Redes sociales: `Instagram` y `LinkedIn` (también `href="#"`)
+- Marca: `hayChat Business` con `NexusIcon` inline
+- Barra inferior: copyright dinámico (`new Date().getFullYear()`) + badge "All systems operational"
 
 ---
 
@@ -330,25 +364,10 @@ Grid de 6 columnas (2 para el branding + 4 para links).
 
 ### `Button.jsx`
 
-Botón polimórfico: renderiza `<a>` si se le pasa `href`, de lo contrario `<button>`.
-
-| Prop | Tipo | Valores | Default |
-|---|---|---|---|
-| `variant` | string | `'primary'` / `'secondary'` / `'outline'` | `'primary'` |
-| `size` | string | `'sm'` / `'md'` / `'lg'` | `'md'` |
-| `href` | string | URL o ancla | — |
-| `target` | string | `'_blank'` etc. | — |
-
-Uso en Navbar y Hero:
-```jsx
-<Button variant="primary" size="sm" href="http://localhost:5173/" target="_blank">
-  Start Free
-</Button>
-
-<Button variant="outline" size="lg">
-  <Play className="w-4 h-4" /> Demo interactiva
-</Button>
-```
+`forwardRef` con `motion.div` wrapper (hover: `scale: 1.02`, tap: `scale: 0.97`).
+Variantes: `primary` (bg-accent, shadow-glow), `secondary` (transparente + borde), `ghost`, `outline`.
+Tamaños: `sm`, `md` (default), `lg`, `xl`.
+Si recibe `href` usa `<a>`, si no usa el prop `as` (default `<button>`).
 
 ### `Card.jsx`
 
@@ -391,44 +410,50 @@ Hook de utilidad para animar elementos al entrar en el viewport durante el scrol
 
 ## 8. Sistema de diseño
 
-### Tema
+**Paleta lila/púrpura clara** (NO modo oscuro):
 
-La página utiliza el tema **oscuro** de Tailwind CSS con variables CSS personalizadas. La clase `dark` está hardcodeada en `<html>` — no hay toggle de tema.
+| Token Tailwind | Valor | Uso |
+|----------------|-------|-----|
+| `background` | `#f6f3ff` | Fondo global (lila muy claro) |
+| `surface` | `#ffffff` | Tarjetas |
+| `surface-2` | `#f3effd` | Hover states |
+| `surface-3` | `#ece5fb` | Hover activo |
+| `border` | `#ddd6f3` | Bordes normales |
+| `border-subtle` | `#cdbfe9` | Bordes hover |
+| `accent` | `#2563eb` | Azul primario (blue-600) |
+| `accent-glow` | `#3b82f6` | Hover del accent |
+| `accent-dim` | `#1e3a8a` | Accent oscuro |
+| `accent-2` | `#60a5fa` | Accent secundario (blue-400) |
+| `foreground` | `#161325` | Texto principal |
+| `foreground-muted` | `#615b78` | Texto secundario |
+| `foreground-subtle` | `#8d87a3` | Texto desactivado |
 
-### Paleta de colores (variables Tailwind extendidas)
+**Sombras custom:**
+- `shadow-glow`: `0 16px 40px rgba(124,58,237,0.16)` (violeta)
+- `shadow-card`: `0 18px 45px rgba(63,38,100,0.08) + ring border`
 
-| Token | Descripción | Uso |
-|---|---|---|
-| `background` | Fondo principal oscuro (navy profundo) | Body, secciones |
-| `foreground` | Texto principal (blanco/casi-blanco) | Títulos, texto principal |
-| `foreground-muted` | Texto secundario (gris medio) | Subtítulos, descripciones |
-| `surface` | Superficie elevada (cards, modals) | Cards, dropdown |
-| `surface-2` | Superficie secundaria | Hover states, inputs |
-| `border` | Color de bordes | Divisores, outline de cards |
-| `accent` | Azul cielo primario `#0ea5e9` | Botones primarios, highlights |
-| `accent-2` | Cyan secundario `#06b6d4` | Acentos alternativos |
+**Animaciones CSS custom (keyframes en Tailwind):**
+| Clase | Comportamiento |
+|-------|---------------|
+| `animate-float` | translateY 0 → -10px → 0, 6s loop |
+| `animate-shimmer` | backgroundPosition sweep, 2.5s |
+| `animate-typing` | opacity blink 1s steps(1) |
+| `animate-fade-up` | opacity + translateY, 0.5s forwards |
+| `animate-glow-pulse` | opacity 0.4→0.8 + scale 1→1.05, 3s |
+| `animate-pulse-slow` | pulse nativo extendido a 4s |
 
-### Clases utilitarias globales
+**Tipografía:** Inter (sans-serif) para UI + JetBrains Mono / Fira Code para código. Cargadas desde Google Fonts.
 
-| Clase | Descripción |
-|---|---|
-| `.glass` | Glassmorphism: `backdrop-blur` + fondo semitransparente + borde sutil |
-| `.text-gradient-white` | Degradado blanco a gris para headlines |
-| `.text-gradient-blue` | Degradado `accent` a `accent-2` para palabras clave |
-| `.shadow-card` | Sombra suave para tarjetas |
-| `.shadow-glow-sm` | Glow sutil en color accent |
-| `.animate-glow-pulse` | Animación CSS de pulso para blobs de fondo |
-| `.section-separator` | Separador visual entre secciones |
-| `.cursor-glow` | Blob circular `position: fixed` que sigue al cursor |
+**Capas visuales globales (`src/index.css`):**
+- Fondo base con gradientes radiales + degradado vertical en `body` y `#root`
+- Scrollbar personalizada (track lila y thumb violeta suave)
+- `::selection` con highlight violeta translúcido
 
-### Tipografía
-
-| Rol | Fuente | Pesos |
-|---|---|---|
-| UI / cuerpo | Inter | 400, 500, 600, 700, 800, 900 |
-| Código / mono | JetBrains Mono | 400, 500 |
-
----
+**Utilidades globales destacadas:**
+- Texto: `text-gradient`, `text-gradient-white`, `text-gradient-blue`, `shimmer-text`
+- Superficie: `glass`, `glass-light`, `chat-shell`, `chat-panel`
+- Chat: `chat-bubble-ai`, `chat-bubble-user`, `typing-dot`
+- Efectos: `border-gradient`, `glow-blue`, `glow-blue-sm`, `noise-bg`, `section-separator`
 
 ## 9. Cómo correr el proyecto
 

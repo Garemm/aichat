@@ -1,5 +1,3 @@
-'use strict';
-
 /**
  * tests/unit/sessionContextService.test.js
  *
@@ -15,24 +13,63 @@
  */
 
 // ─── Mock de ioredis ─────────────────────────────────────────────────────────
-const store     = new Map();
-const listStore = new Map();
-
-const mockRedisInstance = {
-  get:    jest.fn(async (key)             => store.get(key) ?? null),
-  setex:  jest.fn(async (key, _ttl, val)  => { store.set(key, val); return 'OK'; }),
-  rpush:  jest.fn(async (key, val)        => { const l = listStore.get(key) || []; l.push(val); listStore.set(key, l); return l.length; }),
-  lrange: jest.fn(async (key, s, e)       => { const l = listStore.get(key) || []; return e === -1 ? l.slice(s) : l.slice(s, e + 1); }),
-  expire: jest.fn(async ()                => 1),
-  on:     jest.fn(),
-};
-
 jest.mock('ioredis', () => {
-  return jest.fn().mockImplementation(() => mockRedisInstance);
+  const _store     = new Map();
+  const _listStore = new Map();
+  const _hashStore = new Map();
+
+  // Shared negative-index resolver — mirrors real Redis semantics
+  function toJsStart(list, s) { return s < 0 ? Math.max(0, list.length + s) : s; }
+  function toJsEnd(list, e)   { return e < 0 ? list.length + e + 1          : e + 1; }
+
+  const inst = {
+    get:    jest.fn(async (key)             => _store.get(key) ?? null),
+    setex:  jest.fn(async (key, _ttl, val)  => { _store.set(key, val); return 'OK'; }),
+    rpush:  jest.fn(async (key, val)        => { const l = _listStore.get(key) || []; l.push(val); _listStore.set(key, l); return l.length; }),
+    lrange: jest.fn(async (key, s, e)       => { const l = _listStore.get(key) || []; return l.slice(toJsStart(l, s), toJsEnd(l, e)); }),
+    expire: jest.fn(async ()                => 1),
+    del:    jest.fn(async (key)             => { _store.delete(key); _listStore.delete(key); _hashStore.delete(key); return 1; }),
+    ltrim:  jest.fn(async (key, s, e)       => { const l = _listStore.get(key) || []; _listStore.set(key, l.slice(toJsStart(l, s), toJsEnd(l, e))); return 'OK'; }),
+    // Hash operations (used by userProfileService via addRejectedEntity)
+    hset:    jest.fn(async (key, ...args)   => { if (!_hashStore.has(key)) _hashStore.set(key, new Map()); const h = _hashStore.get(key); for (let i = 0; i < args.length; i += 2) h.set(args[i], args[i+1]); return args.length / 2; }),
+    hget:    jest.fn(async (key, field)     => _hashStore.get(key)?.get(field) ?? null),
+    hgetall: jest.fn(async (key)            => { const h = _hashStore.get(key); if (!h || h.size === 0) return null; const o = {}; for (const [k,v] of h) o[k]=v; return o; }),
+    hincrby: jest.fn(async (key, field, n)  => { if (!_hashStore.has(key)) _hashStore.set(key, new Map()); const h = _hashStore.get(key); const v = parseInt(h.get(field) ?? '0', 10) + n; h.set(field, String(v)); return v; }),
+    on:     jest.fn(),
+    // Pipeline support: mirrors global mock — collects commands and executes
+    // them in order when exec() is called.
+    pipeline: jest.fn(function() {
+      const cmds = [];
+      const p = {
+        rpush:   (...a) => { cmds.push(() => inst.rpush(...a));   return p; },
+        expire:  (...a) => { cmds.push(() => inst.expire(...a));  return p; },
+        ltrim:   (...a) => { cmds.push(() => inst.ltrim(...a));   return p; },
+        hset:    (...a) => { cmds.push(() => inst.hset(...a));    return p; },
+        hincrby: (...a) => { cmds.push(() => inst.hincrby(...a)); return p; },
+        exec: jest.fn(async () => {
+          const res = [];
+          for (const fn of cmds) {
+            try { res.push([null, await fn()]); } catch (err) { res.push([err, null]); }
+          }
+          return res;
+        }),
+      };
+      return p;
+    }),
+  };
+  // Populate global refs so test code can access them after module load
+  global.__scsStore     = _store;
+  global.__scsListStore = _listStore;
+  global.__scsInstance  = inst;
+  return jest.fn().mockImplementation(() => inst);
 });
 
-// Importamos DESPUÉS de registrar el mock
-const { getContext, updateContext, EMPTY_CONTEXT } = require('../../src/services/sessionContextService');
+import { getContext, updateContext, EMPTY_CONTEXT } from '../../src/services/sessionContextService.js';
+
+// Global refs are populated by the factory which runs during module load above
+var store             = global.__scsStore;
+var listStore         = global.__scsListStore;
+var mockRedisInstance = global.__scsInstance;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -54,10 +91,12 @@ describe('getContext()', () => {
   test('devuelve estructura con todos los campos en null para sesión nueva', async () => {
     const ctx = await getContext(BIZ, sid('new'));
     expect(ctx).toEqual({
-      lastIntent:     null,
-      lastEntity:     { type: null, value: null },
-      lastAttributes: null,
-      updatedAt:      null,
+      lastIntent:       null,
+      lastEntity:       { type: null, value: null },
+      lastAttributes:   null,
+      updatedAt:        null,
+      topicMemory:      [],
+      rejectedEntities: [],
     });
   });
 
@@ -133,14 +172,14 @@ describe('updateContext()', () => {
     const lastCall = mockRedisInstance.setex.mock.calls.find(([k]) => k === `ctx:${BIZ}:${id}`);
     expect(lastCall).toBeDefined();
     expect(lastCall[0]).toBe(`ctx:${BIZ}:${id}`);
-    expect(lastCall[1]).toBe(210); // TTL exacto
+    expect(lastCall[1]).toBe(1800); // TTL exacto (30 min)
   });
 
-  test('el TTL es exactamente 210 segundos', async () => {
+  test('el TTL es exactamente 1800 segundos (30 minutos)', async () => {
     const id = sid('ttl');
     await updateContext(BIZ, id, { lastIntent: 'precios' });
     const setexCall = mockRedisInstance.setex.mock.calls.find(([k]) => k === `ctx:${BIZ}:${id}`);
-    expect(setexCall[1]).toBe(210);
+    expect(setexCall[1]).toBe(1800);
   });
 
   test('hace MERGE con el contexto previo (no sobreescribe campos no enviados)', async () => {
@@ -236,7 +275,7 @@ describe('Fallback en memoria — flujo con Redis caído', () => {
     mockRedisInstance.get.mockImplementation(async (key) => store.get(key) ?? null);
     mockRedisInstance.setex.mockImplementation(async (key, _ttl, val) => { store.set(key, val); return 'OK'; });
     mockRedisInstance.rpush.mockImplementation(async (key, val) => { const l = listStore.get(key) || []; l.push(val); listStore.set(key, l); return l.length; });
-    mockRedisInstance.lrange.mockImplementation(async (key, s, e) => { const l = listStore.get(key) || []; return e === -1 ? l.slice(s) : l.slice(s, e + 1); });
+    mockRedisInstance.lrange.mockImplementation(async (key, s, e) => { const l = listStore.get(key) || []; const js = s < 0 ? Math.max(0, l.length + s) : s; const je = e < 0 ? l.length + e + 1 : e + 1; return l.slice(js, je); });
     mockRedisInstance.expire.mockImplementation(async () => 1);
   });
 

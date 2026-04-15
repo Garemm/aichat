@@ -48,22 +48,29 @@ const BusinessInfo = () => {
         <button className="btn btn--primary" onClick={() => setEditing(true)}>Editar</button>
       </div>
       <div className="info-card">
-        <Row label="Nombre"      value={business.name}         />
-        <Row label="Categoría"   value={business.category}     />
-        <Row label="Ciudad"      value={business.city}         />
-        <Row label="Descripción" value={business.description}  />
-        <Row label="Email"       value={business.email}        />
-        <Row label="Teléfono"    value={business.phone}        />
-        <Row label="Página web"  value={business.webpage_link} />
+        <Row label="Nombre"       value={business.name}            />
+        <Row label="Categoría"    value={business.category_name}   />
+        <Row label="Ciudad"       value={business.city}            />
+        <Row label="Descripción"  value={business.description}     />
+        <Row label="Email"        value={business.email}           />
+        <Row label="Teléfono"     value={business.phone}           />
+        <Row label="Página web"   value={business.webpage_link}    isLink />
+        <Row label="Google Maps"  value={business.google_maps_url} isLink />
       </div>
     </div>
   );
 };
 
-const Row = ({ label, value }) => (
+const Row = ({ label, value, isLink }) => (
   <div className="info-row">
     <span className="info-row__label">{label}</span>
-    <span className="info-row__value">{value ?? '—'}</span>
+    <span className="info-row__value">
+      {value
+        ? isLink
+          ? <a href={value} target="_blank" rel="noopener noreferrer" className="info-row__link">{value}</a>
+          : value
+        : '—'}
+    </span>
   </div>
 );
 

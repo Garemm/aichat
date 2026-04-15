@@ -1,5 +1,5 @@
 // ── Hours Controller ──────────────────────────────────────────────────────────
-const HoursModel = require('../models/hoursModel');
+import HoursModel from '../models/hoursModel.js';
 
 const list = async (req, res, next) => {
   try {
@@ -12,6 +12,8 @@ const list = async (req, res, next) => {
 const upsertOne = async (req, res, next) => {
   try {
     const row = await HoursModel.upsert(req.businessId, req.body);
+    // Sync acepto_pedidos based on current time vs updated schedule
+    await HoursModel.syncAceptaPedidos(req.businessId);
     res.json({ success: true, data: row });
   } catch (err) { next(err); }
 };
@@ -24,6 +26,8 @@ const bulkSave = async (req, res, next) => {
       return res.status(400).json({ success: false, error: 'days debe ser un arreglo' });
     }
     const result = await HoursModel.bulkUpsert(req.businessId, days);
+    // Sync acepto_pedidos based on current time vs updated schedule
+    await HoursModel.syncAceptaPedidos(req.businessId);
     res.json({ success: true, data: result });
   } catch (err) { next(err); }
 };
@@ -32,8 +36,10 @@ const remove = async (req, res, next) => {
   try {
     const deleted = await HoursModel.remove(parseInt(req.params.id, 10), req.businessId);
     if (!deleted) return res.status(404).json({ success: false, error: 'No encontrado' });
+    // Re-sync after removing a day's hours
+    await HoursModel.syncAceptaPedidos(req.businessId);
     res.json({ success: true });
   } catch (err) { next(err); }
 };
 
-module.exports = { list, upsertOne, bulkSave, remove };
+export { list, upsertOne, bulkSave, remove };

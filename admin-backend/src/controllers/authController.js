@@ -1,10 +1,10 @@
 // ── Auth Controller ──────────────────────────────────────────────────────────
-const crypto        = require('crypto');
-const authService   = require('../services/authService');
-const emailService  = require('../services/emailService');
-const BusinessModel = require('../models/businessModel');
-const AdminModel    = require('../models/adminModel');
-const jwtUtils      = require('../config/jwt');
+import crypto from 'crypto';
+import * as authService from '../services/authService.js';
+import * as emailService from '../services/emailService.js';
+import BusinessModel from '../models/businessModel.js';
+import AdminModel from '../models/adminModel.js';
+import * as jwtUtils from '../config/jwt.js';
 
 /** SHA-256 hash of a refresh token for safe DB storage. */
 const hashToken = (token) =>
@@ -28,7 +28,13 @@ const login = async (req, res, next) => {
     // Deliver refresh token via HTTP-only cookie (not accessible from JS)
     res.cookie('rt', refreshToken, jwtUtils.REFRESH_COOKIE_OPTS);
 
-    res.json({ success: true, accessToken, businessId: admin.business_id });
+    res.json({
+      success: true,
+      accessToken,
+      businessId:  admin.business_id,
+      permissions: admin.permissions,
+      isActive:    admin.is_active ?? false,
+    });
   } catch (err) {
     if (err.message === 'Credenciales incorrectas') {
       return res.status(401).json({ success: false, error: err.message });
@@ -53,6 +59,9 @@ const forgotPassword = async (req, res, next) => {
     if (record) {
       const rawToken = await authService.createResetToken(record.admin_id);
       await emailService.sendPasswordReset(email, rawToken, record.business_name);
+    }else{
+      // Optional: log the attempt for monitoring (but never the email)
+      console.warn(`Requisición de restablecimiento de contraseña para un correo no registrado: ${email}`);
     }
 
     // Always respond the same way
@@ -151,7 +160,13 @@ const refreshToken = async (req, res, next) => {
     await AdminModel.saveRefreshTokenHash(admin.id, hashToken(newRefresh));
     res.cookie('rt', newRefresh, jwtUtils.REFRESH_COOKIE_OPTS);
 
-    res.json({ success: true, accessToken: newAccess, businessId: admin.business_id });
+    res.json({
+      success: true,
+      accessToken: newAccess,
+      businessId:  admin.business_id,
+      permissions: authService.buildPermissions(admin),
+      isActive:    admin.is_active ?? false,
+    });
   } catch (err) { next(err); }
 };
 
@@ -173,5 +188,5 @@ const logout = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-module.exports = { login, forgotPassword, resetPassword, changePassword, refreshToken, logout };
+export { login, forgotPassword, resetPassword, changePassword, refreshToken, logout };
 

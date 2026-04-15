@@ -22,11 +22,21 @@
  * intent key is automatically scanned by detectIntent().
  */
 
-const intents = require('../mockai/intents');
-const { normalize } = require('./normalize');
+import intents from '../mockai/intents.js';
+import { normalize } from './normalize.js';
+import { getExpandedIntents } from './redisService.js';
 
 /** Minimum score for an intent to be considered detected. */
 const MIN_CONFIDENCE = 1;
+
+/**
+ * Runtime intents dictionary loaded from Redis by initIntents().
+ * When non-null this is the morphologically expanded version of intents.js
+ * (produced by intentExpanderService.bootstrapIntents at server startup).
+ * Stays null until initIntents() resolves, at which point detectIntent() and
+ * scoreIntents() automatically use the richer dictionary.
+ */
+let _activeIntents = null;
 
 /**
  * High-priority pre-check patterns for the 'descripcion' intent.
@@ -68,10 +78,21 @@ const DESCRIPCION_PRIORITY_PATTERNS = [
  * @param {object} [intentsConfig] Custom intents config (for testing). Defaults to intents.js.
  * @returns {Record<string, number>}
  */
-function scoreIntents(normalizedText, intentsConfig = intents) {
+/**
+ * Returns the active intents dictionary.
+ * Priority: explicit override arg → Redis-expanded dict → static intents.js
+ * @param {object|undefined} override  Passed as second arg to detectIntent/scoreIntents.
+ * @returns {object}
+ */
+function _getIntents(override) {
+  return override || _activeIntents || intents;
+}
+
+function scoreIntents(normalizedText, intentsConfig = undefined) {
+  const activeIntents = _getIntents(intentsConfig);
   const scores = {};
 
-  for (const [intentKey, intent] of Object.entries(intentsConfig)) {
+  for (const [intentKey, intent] of Object.entries(activeIntents)) {
     let totalScore = 0;
 
     for (const { phrase, weight } of intent.keywords) {
@@ -96,7 +117,7 @@ function scoreIntents(normalizedText, intentsConfig = intents) {
  * @param {object} [intentsConfig] Custom intents config (for testing).
  * @returns {{ intent: string|null, score: number, scores: Record<string, number>, confident: boolean }}
  */
-function detectIntent(message, intentsConfig = intents) {
+function detectIntent(message, intentsConfig = undefined) {
   if (!message) return { intent: null, score: 0, scores: {}, confident: false };
 
   const normalizedText = normalize(message);
@@ -142,8 +163,60 @@ function detectIntent(message, intentsConfig = intents) {
  * @param {object} [intentsConfig]
  * @returns {boolean}
  */
-function isStandaloneIntent(intentKey, intentsConfig = intents) {
-  return intentsConfig[intentKey]?.standalone === true;
+function isStandaloneIntent(intentKey, intentsConfig = undefined) {
+  return _getIntents(intentsConfig)[intentKey]?.standalone === true;
 }
 
-module.exports = { detectIntent, scoreIntents, isStandaloneIntent, MIN_CONFIDENCE };
+/**
+ * Loads the morphologically expanded intents dictionary from Redis into the
+ * module-level _activeIntents variable.  Must be called AFTER bootstrapIntents()
+ * has run in server.js.
+ *
+ * Falls back gracefully: if Redis is unavailable the static intents.js stays
+ * in use and detection continues without interruption.
+ *
+ * @returns {Promise<void>}
+ */
+async function initIntents() {
+  try {
+    const expanded = await getExpandedIntents();
+    if (expanded && typeof expanded === 'object') {
+      _activeIntents = expanded;
+      const total = Object.values(expanded).reduce((s, i) => s + i.keywords.length, 0);
+      console.log(`[IntentDetector] Vocabulario activo: ${total} keywords (expandido desde Redis)`);
+    } else {
+      console.log('[IntentDetector] Redis no disponible — usando vocabulario estático');
+    }
+  } catch (err) {
+    console.warn('[IntentDetector] initIntents error:', err.message);
+  }
+}
+
+/**
+ * Returns ALL intents with score ≥ MIN_CONFIDENCE, sorted by score descending.
+ *
+ * Used by the multi-intent parser to determine whether secondary segments from
+ * a split compound message carry a detectable, different intent than the primary.
+ *
+ * @param {string} message  Raw or already-normalized message text.
+ * @returns {{ intent: string, score: number }[]}
+ *
+ * @example
+ * detectMultipleIntents('cuanto cuesta la pizza y a que hora abren')
+ * // [
+ * //   { intent: 'precios',  score: 3 },
+ * //   { intent: 'horarios', score: 2 },
+ * // ]
+ */
+function detectMultipleIntents(message) {
+  if (!message) return [];
+  const normalizedText = normalize(message);
+  const scores = scoreIntents(normalizedText);
+
+  return Object.entries(scores)
+    .filter(([, score]) => score >= MIN_CONFIDENCE)
+    .sort(([, a], [, b]) => b - a)
+    .map(([intent, score]) => ({ intent, score }));
+}
+
+export { detectIntent, scoreIntents, isStandaloneIntent, initIntents, detectMultipleIntents, MIN_CONFIDENCE };

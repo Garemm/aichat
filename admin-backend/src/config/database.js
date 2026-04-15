@@ -1,5 +1,5 @@
 // ── Database config (shared pg pool pointing to same DB as chat backend) ───
-const { Pool } = require('pg');
+import { Pool } from 'pg';
 
 const db = new Pool({
   host:     process.env.DB_HOST,
@@ -9,4 +9,4 @@ const db = new Pool({
   password: String(process.env.DB_PASSWORD ?? ''),
 });
 
-module.exports = db;
+export default db;

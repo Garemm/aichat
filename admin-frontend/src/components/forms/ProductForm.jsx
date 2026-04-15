@@ -43,6 +43,10 @@ const ProductForm = ({ product, categories, onSaved, onCancel }) => {
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
+    if (!form.item_code_empresa?.trim()) {
+      setError('El código de ítem es obligatorio. Ingresa un código antes de guardar.');
+      return;
+    }
     setSaving(true);
     try {
       const payload = {
@@ -101,7 +105,7 @@ const ProductForm = ({ product, categories, onSaved, onCancel }) => {
       </label>
 
       <label>
-        Código de ítem
+        Código de ítem *
         <input
           placeholder="Ej: SKU-001"
           value={form.item_code_empresa}

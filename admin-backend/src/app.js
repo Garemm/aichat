@@ -1,9 +1,9 @@
 // ── Admin Backend — Express App ─────────────────────────────────────────────
-const express      = require('express');
-const cors         = require('cors');
-const cookieParser = require('cookie-parser');
-const router       = require('./routes');
-const errorHandler = require('./middlewares/errorHandler');
+import express from 'express';
+import cors from 'cors';
+import cookieParser from 'cookie-parser';
+import router from './routes/index.js';
+import errorHandler from './middlewares/errorHandler.js';
 
 const app = express();
 
@@ -20,4 +20,4 @@ app.use('/admin', router);
 
 app.use(errorHandler);
 
-module.exports = app;
+export default app;

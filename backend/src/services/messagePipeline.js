@@ -26,14 +26,17 @@
  *           clear intent in message → IGNORE previous context entity.
  */
 
-const { normalize } = require('./normalize');
-const { preprocessMessage } = require('./textPreprocessor');
-const { detectIntent, isStandaloneIntent } = require('./intentDetector');
-const { detectEntities, queryProducts, formatProductResponse } = require('./entityDetector');
-const { detectDay } = require('./dayDetector');
-const { getContext, updateContext } = require('./sessionContextService');
-const { logProductQuery } = require('./queryLogService');
-const {
+import { normalize } from './normalize.js';
+import { preprocessMessage, detectNegation } from './textPreprocessor.js';
+import { detectIntent, isStandaloneIntent } from './intentDetector.js';
+import { detectEntities, queryProducts, queryCategories, formatProductResponse, formatPartialMatchResponse } from './entityDetector.js';
+import { getSynonymsAcrossCategories, getSynonymsByBusinessId } from './synonyms.js';
+import { detectDay } from './dayDetector.js';
+import { getContext, updateContext } from './sessionContextService.js';
+import { pushTurnMemory, addRejectedEntity } from './redisService.js';
+import { parseMultiIntent, joinResponses } from './multiIntentParser.js';
+import { logProductQuery } from './queryLogService.js';
+import {
   getBusinessInfoByIntent,
   getHorariosByDay,
   getCategories,
@@ -41,14 +44,14 @@ const {
   countProductosByCategory,
   getProductAttributes,
   getServiceByName,
-} = require('./businessInfoService');
-const { formatIntentResponse, formatHorarioDay, formatList, formatDescripcionResponse, formatProductAttributes, formatServiceDetail, formatServiceWithContact } = require('./intentResponseFormatter');
-const { getKeywordResponse } = require('../mockai/keywordResponses');
-const { getMockOpenAIResponse, getRAGOpenAIResponse } = require('../temp/mockOpenAI');
-const { shouldUseAI, hasRelevantData } = require('./aiDecisionEngine');
-const { filterRelevantData } = require('./ragFilterService');
-const { searchByAttributes, searchByCompoundQuery, searchByCategoryAttribute, formatAttributeResponse, formatCompoundQueryResponse, formatCategoryAttributeResponse } = require('./attributeSearchService');
-const { extractAttribute } = require('./attributeExtractor');
+} from './businessInfoService.js';
+import { formatIntentResponse, formatHorarioDay, formatList, formatDescripcionResponse, formatProductAttributes, formatServiceDetail, formatServiceWithContact } from './intentResponseFormatter.js';
+import { getKeywordResponse } from '../mockai/keywordResponses.js';
+import { getMockOpenAIResponse } from '../temp/mockOpenAI.js';
+import { shouldUseAI } from './aiDecisionEngine.js';
+import { handleAIGate } from './subscriptionController.js';
+import { searchByAttributes, searchByCompoundQuery, searchByCategoryAttribute, formatAttributeResponse, formatCompoundQueryResponse, formatCategoryAttributeResponse } from './attributeSearchService.js';
+import { extractAttribute } from './attributeExtractor.js';
 
 /** Minimum score to consider intent as "high confidence" (skip context). */
 const HIGH_CONFIDENCE_THRESHOLD = 3;
@@ -74,6 +77,30 @@ const COMPRAR_GENUINELY_STANDALONE = [
   'tienda en linea', 'quiero pedirlo',
 ];
 
+/**
+ * Regex patterns that signal "I want to buy the PREVIOUSLY mentioned product".
+ * These are pronoun-based purchase phrases — they don't name a product;
+ * they refer anaphorically to the product confirmed in context.
+ *
+ * All patterns are tested on already-normalised text (accents stripped, lowercase).
+ * Rule 4.9 in decide() uses these to route to 'comprar_context' before
+ * extractFollowUpEntity() can misinterpret the phrase as a product name.
+ */
+const COMPRAR_PRONOUN_PATTERNS = [
+  /\bme\s+gustaria\b/,                         // "me gustaria pedir una"
+  /\bquisiera\b/,                               // "quisiera pedirlo"
+  /\bme\s+l[ao]\s+llevo\b/,                    // "me lo/la llevo"
+  /\bl[ao]\s+quiero\b/,                         // "lo/la quiero"
+  /\bquiero\s+(?:un[oa]|ese|esa)\b/,           // "quiero una" / "quiero ese"
+  /\bdame(?:lo|la|me)?\s*(?:un[oa])?\b/,       // "damelo" / "dame una"
+  /\bdeme\s+(?:un[oa])\b/,                      // "deme uno/una"
+  /\bvoy\s+a\s+compr[ao]r(?:lo|la)?\b/,       // "voy a comprarlo"
+  /\bcompr[ao]r(?:lo|la)\b/,                   // "comprarlo" / "comprarla"
+  /\bpedir(?:lo|la)\b/,                         // "pedirlo" / "pedirla"
+  /\bl[ao]\s+pido\b/,                           // "lo pido" / "la pido"
+  /\bme\s+lo\s+das\b|\bme\s+la\s+das\b/,      // "me lo das" / "me la das"
+];
+
 // ─── Pagination / category navigation helpers ─────────────────────────────────
 
 /** Patterns that mean "show me next page". */
@@ -86,6 +113,11 @@ const SEE_MORE_PATTERNS = [
   /^mas resultados$/,
   /^continuar$/,
   /^mas opciones$/,
+  // "otras mas" / "otros mas" — colloquial "show me more (of the others)"
+  /^otras?\s+mas$/,
+  /^otras?\s+opciones$/,
+  /^ver\s+otras?$/,
+  /^otras?\s+mas\s+opciones$/,
 ];
 
 function isSeekingMore(normalizedText) {
@@ -213,6 +245,12 @@ function extractServiceQuery(normalizedText) {
     // Explicit "servicio de X" / "servicio X"
     /\bservicios?\s+de\s+(.+?)(?:\?|$)/,
     /\bservicios?\s+(.+?)(?:\?|$)/,
+    // Price/cost queries about a service: "que precio tiene la renta de salon para eventos"
+    /\bque\s+(?:precio|costo|valor|tarifa|cuesta|cobran?)\s+(?:tiene[ns]?|es|cobran?|hay)?\s*(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(.+?)(?:\?|$)/,
+    // "cuanto cuesta/vale/cobran [por] X"
+    /\bcuanto\s+(?:cuesta[n]?|vale[n]?|cobran?(?:\s+por)?)\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(.+?)(?:\?|$)/,
+    // "en cuanto tiene/tienes/tienen X" / "a cuanto tiene X" — Mexican Spanish price query
+    /\b(?:en|a)\s+cuanto\s+tiene[sn]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(.+?)(?:\?|$)/,
     // Description queries about a service: "que incluye/contiene/trae/lleva/es X"
     // Strip the verb phrase to get just the service-name portion.
     /\bque\s+(?:incluye[n]?|contiene[n]?|trae[n]?|lleva[n]?|es|son)\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(.+?)(?:\?|$)/,
@@ -260,6 +298,10 @@ const AMBIGUOUS_PATTERNS = [
   /^en cuanto esta$/,
   /^y precio$/,
   /^y el precio$/,
+  /^y precios$/,         // plural — "¿Y precios?" after product context
+  /^y la promo$/,
+  /^y las promos$/,
+  /^y promociones$/,
   /^esta disponible$/,
   /^hay stock$/,
   /^que mas tienen$/,
@@ -318,10 +360,26 @@ const QUESTION_WORDS = new Set([
 function enrichFollowUpCandidate(candidate, contextValue) {
   const PREP_PREFIX = /^(?:de[l]?|con|en|al|a)\s+/;
   if (!PREP_PREFIX.test(candidate) || !contextValue) return candidate;
+
+  // "del X" — contracted de+el — the candidate IS a standalone product reference
+  // (e.g. "del agua de jamaica" → "agua de jamaica").
+  // Never prepend the context entity; just strip the contracted article.
+  if (/^del\s+/.test(candidate)) {
+    return candidate.replace(/^del\s+/, '');
+  }
+
   // Extract base of context entity (everything before the first preposition)
   const baseMatch = contextValue.match(/^(.+?)\s+(?:de[l]?|con|en|al|a)\s+/);
   if (baseMatch?.[1]) {
     return `${baseMatch[1]} ${candidate}`;
+  }
+  // contextValue is a simple noun with no preposition.
+  // "con ..." is always an attribute qualifier → prepend the base automatically.
+  //   e.g. lastEntity="hamburguesa", candidate="con queso" → "hamburguesa con queso"
+  // "de/del/al/en/a ..." can be a standalone product-name prefix (e.g. "agua de jamaica")
+  //   → leave the candidate as-is so the DB lookup can match it directly.
+  if (/^con\s+/.test(candidate)) {
+    return `${contextValue} ${candidate}`;
   }
   return candidate;
 }
@@ -374,6 +432,23 @@ function extractFollowUpEntity(normalizedText, lastEntity) {
     'si', 'no', 'ok', 'ya', 'hola', 'gracias', 'buenas', 'saludos',
     // Follow-up trigger words — excluded so Shape 2 doesn't include them in the entity
     'tambien', 'igual', 'otro', 'otra', 'tb', 'tmb',
+    // Purchase-action verbs — these signal intent to BUY, never appear as product names.
+    // Without this guard, "me gustaria pedir una" would be extracted as a product name.
+    'pedir', 'ordenar', 'comprar', 'adquirir',
+    // Purchase imperative commands — "dame una X", "trae un X", "pedi una X" include
+    // the product name BUT also the imperative verb; treat the whole phrase as intent,
+    // not as a bare product follow-up. Entity extraction handled via PRODUCT_QUERY_PATTERNS.
+    'dame', 'trae', 'traeme', 'pedi',
+    // Modal desire words — similarly anaphoric, never product names
+    'gustaria', 'quisiera',
+    // Reflexive purchase tokens
+    'llevarme', 'quedarme',
+    // Copula verb forms — "es natural?", "están frescos?" are yes/no questions about the
+    // current context product, not product-name candidates.
+    'es', 'estan',
+    // Continuation / pagination words — "otras mas", "mas", "otras" are never product names.
+    // "otras mas" means "show me more"; letting it through stores a corrupted entity.
+    'otras', 'otros', 'mas',
   ]);
   const tokens = normalizedText.split(/\s+/);
   // Allow leading articles in the token count — they'll be stripped after the check.
@@ -440,9 +515,15 @@ function decide(intentResult, entityResult, context, normalizedText) {
   }
 
   // Rule -1c: Still in category_selection state but no match → re-prompt with list
-  // Exception: if the user sends a standalone intent (e.g. "que servicios tienen"),
-  // let it through so the pipeline handles it normally.
-  if (context.lastIntent === 'category_selection' && context.availableCategories?.length > 0 && !(hasIntent && standalone)) {
+  // Exceptions:
+  //   1. Standalone intent (e.g. "que servicios tienen") — let through normally.
+  //   2. Attribute entity detected (e.g. "tiene algo con pollo?") — skip re-prompt
+  //      so the attribute search path handles it directly instead of looping.
+  //   3. Product/category entity explicitly detected in the current message
+  //      (e.g. "de casualidad tienes refresco?") — the user is asking about a
+  //      specific item, not selecting from the category list; let Rule 2 handle it.
+  const isAttributeEntity = entityResult.type === 'attribute';
+  if (context.lastIntent === 'category_selection' && context.availableCategories?.length > 0 && !(hasIntent && standalone) && !isAttributeEntity && !hasEntity) {
     return {
       strategy: 'category_reprompt',
       intent: null,
@@ -457,10 +538,15 @@ function decide(intentResult, entityResult, context, normalizedText) {
   // to a previously mentioned product. If the last search returned nothing, these
   // mean the user is asking for something that doesn't exist → surface a clear
   // "not available" response instead of routing to generic purchase contact info.
+  //
+  // Guard: skip when the current message explicitly names a NEW product entity
+  // (e.g. "dame una pizza hawaiana" after a failed "hamburguesa doble" lookup).
+  // In that case hasEntity=true and Rule 2 should handle it directly.
   if (
     intentResult.intent === 'comprar' &&
     context.lastEntityFound === false &&
-    context.lastEntity?.value
+    context.lastEntity?.value &&
+    !hasEntity
   ) {
     const hasGenuinePhrase = COMPRAR_GENUINELY_STANDALONE
       .some((p) => normalizedText.includes(normalize(p)));
@@ -497,7 +583,7 @@ function decide(intentResult, entityResult, context, normalizedText) {
   //   - message is not purely ambiguous and has enough text to match against
   if (
     context.lastIntent === 'servicios' &&
-    entityResult.type !== 'product' &&
+    !(entityResult.type === 'product' && entityResult._rows?.length > 0) &&
     entityResult.type !== 'category' &&
     !(hasIntent && standalone) &&
     !(intentResult.intent === 'productos' && highConfidence) &&
@@ -525,22 +611,40 @@ function decide(intentResult, entityResult, context, normalizedText) {
     };
   }
 
-  // Rule 1: High-confidence standalone intent → use intent alone, ignore everything
-  if (hasIntent && standalone && highConfidence) {
+  // Rule 0b: Purchase-pronoun + confirmed context product beats high-confidence
+  // standalone 'comprar' routing. Phrases like "quiero una", "quiero ese",
+  // "lo quiero" score as comprar at weight 3 (highConfidence=true) and would
+  // fire Rule 1 BEFORE Rule 4.9 can intercept them. Pre-empt Rule 1 here so
+  // the purchase form is shown for the confirmed product instead of generic
+  // comprar info.
+  if (
+    !hasEntity &&
+    intentResult.intent === 'comprar' &&
+    context.lastEntity?.type === 'product' &&
+    context.lastEntity?.value &&
+    context.lastEntityFound !== false &&
+    COMPRAR_PRONOUN_PATTERNS.some((p) => p.test(normalizedText))
+  ) {
     return {
-      strategy: 'intent',
-      intent: intentResult.intent,
-      entity: { type: null, value: null },
-      usedContext: false,
-      reason: `standalone intent "${intentResult.intent}" score=${intentResult.score}`,
+      strategy:    'comprar_context',
+      intent:      'comprar',
+      entity:      { type: context.lastEntity.type, value: context.lastEntity.value },
+      usedContext: true,
+      reason:      `purchase pronoun + confirmed product "${context.lastEntity.value}" [pre-Rule1]`,
     };
   }
 
-  // Rule 1.5: AI pre-screen — recommendation/comparison patterns beat entity routing.
+  // Rule 1.5: AI pre-screen — must run BEFORE the high-confidence intent guard so
+  // recommendation/comparison/superlative signals always win, even when a standalone
+  // intent fires first.
+  //
+  // Example: "recomiendame algo rico" scores 3 on the 'comprar' intent (substring
+  // "dame" is inside "recomiendame") which would otherwise trigger Rule 1 and return
+  // strategy='intent'. The pre-screen intercepts first via RECOMMEND_RE.
+  //
   // "que me recomienda de postres?" detects entity "postres" but user wants
   // AI reasoning, not a raw catalog. Ask shouldUseAI with the real entity so
-  // the (now-fixed) decision engine can bypass the entity guard when text
-  // explicitly signals a recommendation or comparison.
+  // the decision engine can bypass the entity guard for recommendation/comparison.
   const aiPrescreen = shouldUseAI(normalizedText, intentResult, entityResult, context);
   if (aiPrescreen.routing === 'ai') {
     return {
@@ -549,6 +653,18 @@ function decide(intentResult, entityResult, context, normalizedText) {
       entity: { type: null, value: null },
       usedContext: false,
       reason: `AI pre-screen: ${aiPrescreen.reason}`,
+    };
+  }
+
+  // Rule 1: High-confidence standalone intent → use intent alone, ignore everything
+  // (only reached when the AI pre-screen above determined backend is sufficient)
+  if (hasIntent && standalone && highConfidence) {
+    return {
+      strategy: 'intent',
+      intent: intentResult.intent,
+      entity: { type: null, value: null },
+      usedContext: false,
+      reason: `standalone intent "${intentResult.intent}" score=${intentResult.score}`,
     };
   }
 
@@ -568,6 +684,17 @@ function decide(intentResult, entityResult, context, normalizedText) {
       },
       usedContext: false,
       reason: `attribute detected: "${entityResult.value}" (${entityResult.attributeType})`,
+    };
+  }
+
+  // Rule 1.8: Service entity detected → route directly to servicios handler
+  if (entityResult.type === 'service') {
+    return {
+      strategy: 'entity',
+      intent: 'servicios',
+      entity: { type: 'service', value: entityResult.value },
+      usedContext: false,
+      reason: `service entity detected: "${entityResult.value}"`,
     };
   }
 
@@ -661,6 +788,89 @@ function decide(intentResult, entityResult, context, normalizedText) {
     }
   }
 
+  // Rule 4.6: "es [adjective]?" / "están [adjective]?" — yes/no description question
+  // about the confirmed context product. "¿Es natural?", "¿Es picante?", "¿Es vegano?"
+  // are attribute questions about the product just presented, NOT product-name searches.
+  // Fires before Rule 5 so "es natural" is never extracted as a product-name candidate.
+  const COPULA_ADJ_RE = /^(?:es|estan)\s+[\wñ]/;
+  if (
+    !hasEntity &&
+    COPULA_ADJ_RE.test(normalizedText) &&
+    context.lastEntity?.type === 'product' &&
+    context.lastEntity?.value &&
+    context.lastEntityFound !== false
+  ) {
+    return {
+      strategy:    'context',
+      intent:      'descripcion',
+      entity:      { type: context.lastEntity.type, value: context.lastEntity.value },
+      usedContext: true,
+      reason:      `yes/no adjective question about context product "${context.lastEntity.value}"`,
+    };
+  }
+
+  // Rule 4.8: "con X" attribute follow-up in product context.
+  // "y una con queso" after context { type: "product", value: "hamburguesa" }
+  // → compound search: hamburguesas that CONTAIN queso.
+  // Must fire before extractFollowUpEntity so "con queso" is never treated as a product name.
+  //
+  // Base-noun extraction: strip any " con X" compound previously stored by an AI turn
+  // (e.g. lastEntity.value = "hamburguesa con picante") so compound search receives
+  // just "hamburguesa" + new attribute, not the accumulated string.
+  const CON_FOLLOWUP_RE = /^(?:y\s+)?(?:(?:un[ao]?|es[ao]?)\s+)?con\s+(?<attr>[\w\u00f1][\w\u00f1\s]{0,30}?)\s*\??$/;
+  if (
+    !hasEntity &&
+    context.lastEntity?.type === 'product' &&
+    context.lastEntity?.value
+  ) {
+    const conMatch = normalizedText.match(CON_FOLLOWUP_RE);
+    const attrWord = conMatch?.groups?.attr?.trim();
+    if (attrWord && attrWord.length >= 2) {
+      // Strip " con X" suffix that may have been persisted by a prior AI turn.
+      const entityBase = context.lastEntity.value.replace(/\s+con\s+.+$/, '').trim();
+      return {
+        strategy: 'attribute',
+        intent: 'productos',
+        entity: {
+          type: 'attribute',
+          value: `${entityBase} con ${attrWord}`,
+          attributeType: 'feature',
+          entityTerm: entityBase,
+          attributeTerm: attrWord,
+          categoryTerm: null,
+        },
+        usedContext: true,
+        reason: `attribute follow-up: "${entityBase}" con "${attrWord}"`,
+      };
+    }
+  }
+
+  // Rule 4.9: Purchase pronoun after a confirmed context product.
+  // Phrases like "me gustaria pedir una", "lo quiero", "dame una", "me lo llevo"
+  // refer anaphorically to the product confirmed in the previous turn.
+  // Must fire BEFORE Rule 5 so extractFollowUpEntity never processes them as
+  // product names (which would cause a failed DB lookup with garbage text).
+  //
+  // Conditions:
+  //   – No entity was detected directly in the current message
+  //   – The message contains a purchase-pronoun signal
+  //   – Context has a confirmed product (lastEntityFound !== false)
+  if (
+    !hasEntity &&
+    context.lastEntity?.type === 'product' &&
+    context.lastEntity?.value &&
+    context.lastEntityFound !== false &&
+    COMPRAR_PRONOUN_PATTERNS.some((p) => p.test(normalizedText))
+  ) {
+    return {
+      strategy:   'comprar_context',
+      intent:     'comprar',
+      entity:     { type: context.lastEntity.type, value: context.lastEntity.value },
+      usedContext: true,
+      reason:     `purchase pronoun referring to confirmed product "${context.lastEntity.value}"`,
+    };
+  }
+
   // Rule 5: Check for follow-up entity ("¿Y pizza mexicana?", "tambien X", bare noun)
   const followUp = extractFollowUpEntity(normalizedText, context.lastEntity);
   if (followUp) {
@@ -718,6 +928,19 @@ function decide(intentResult, entityResult, context, normalizedText) {
  * @returns {Record<string, any>}  Partial update for Redis (or {} for no-op)
  */
 function buildContextUpdate(decision) {
+  // AI path: if a product entity was identified in the message, save it so
+  // follow-up turns (e.g. "y una con queso") can resolve against the right product.
+  // When no entity was found, return {} — existing context is left untouched.
+  if (decision.strategy === 'ai') {
+    if (decision._aiEntity?.value) {
+      return {
+        lastIntent: 'productos',
+        lastEntity: decision._aiEntity,
+      };
+    }
+    return {};
+  }
+
   // Pagination advance — offset is managed inside executeDecision via direct updateContext
   if (decision.strategy === 'pagination') return {};
 
@@ -736,10 +959,25 @@ function buildContextUpdate(decision) {
 
   // Attribute search — store the searched attribute(s) in Redis
   if (decision.strategy === 'attribute') {
+    // When the attribute came from a product-context follow-up (e.g. "con queso" after
+    // "hamburguesa"), preserve the product entity as lastEntity so subsequent
+    // "con X" turns keep anchoring to the same product TYPE (base noun),
+    // not the specific product variant ("hamburguesa doble" → store "hamburguesa").
+    const PREP_ART = new Set(['de', 'del', 'con', 'sin', 'al', 'a', 'en', 'el', 'la', 'los', 'las', 'un', 'una']);
+    const rawEntityTerm = decision.entity.entityTerm;
+    const baseEntityTerm = rawEntityTerm
+      ? (rawEntityTerm.split(/\s+/).find((w) => !PREP_ART.has(w)) || rawEntityTerm.split(/\s+/)[0])
+      : null;
+    const entityToStore = baseEntityTerm
+      ? { type: 'product', value: baseEntityTerm }
+      : { type: 'attribute', value: decision.entity.value };
+    const attrsToStore = decision.entity.entityTerm
+      ? null
+      : (decision._attributes ?? [{ value: decision.entity.value, type: decision.entity.attributeType }]);
     return {
       lastIntent: 'productos',
-      lastEntity: { type: 'attribute', value: decision.entity.value },
-      lastAttributes: decision._attributes ?? [{ value: decision.entity.value, type: decision.entity.attributeType }],
+      lastEntity: entityToStore,
+      lastAttributes: attrsToStore,
       lastEntityFound: true,
       paginationCategory: null,
       paginationOffset: null,
@@ -814,6 +1052,91 @@ function buildContextUpdate(decision) {
 }
 
 // ─── Response execution ───────────────────────────────────────────────────────
+
+/**
+ * Queries products with awareness of compound "X con Y" entity values.
+ *
+ * When an AI recommendation stores "hamburguesa con picante" as lastEntity.value,
+ * a plain ILIKE search for that phrase finds nothing (no product is literally named
+ * that). This helper splits the value at " con " and runs searchByCompoundQuery
+ * instead, so results are correctly scoped to the attribute constraint.
+ *
+ * Falls through to a regular queryProducts call when:
+ *   - the value has no " con " separator, OR
+ *   - the compound search returns zero rows.
+ *
+ * @param {string} entityValue
+ * @param {number} businessId
+ * @returns {Promise<{ rows: Array, compound: object|null }>}
+ */
+async function queryProductsCompoundAware(entityValue, businessId) {
+  const CON_SPLIT = /^(.+?)\s+con\s+(.+)$/.exec(entityValue);
+  if (CON_SPLIT) {
+    const [, baseEntity, attrTerm] = CON_SPLIT;
+    try {
+      const { rows } = await searchByCompoundQuery(
+        { entity: baseEntity, attribute: attrTerm, fullPhrase: entityValue },
+        businessId
+      );
+      if (rows.length > 0) {
+        return {
+          rows,
+          compound: { entity: baseEntity, attribute: attrTerm, fullPhrase: entityValue },
+          partialMatch: false,
+        };
+      }
+    } catch { /* fall through */ }
+  }
+  const rows = await queryProducts(entityValue, businessId);
+  if (rows.length > 0) return { rows, compound: null, partialMatch: false };
+
+  // ── Word-by-word fallback ────────────────────────────────────────────
+  // When searching for a multi-word phrase (e.g. "escuadra metalica") returns no
+  // results, retry with each individual significant word so we surface the base
+  // product ("Escuadra de 12\"") and tell the customer it's a related match.
+  const words = entityValue.split(/\s+/).filter((w) => w.length >= 3);
+  if (words.length >= 2) {
+    for (const word of words) {
+      const fallbackRows = await queryProducts(word, businessId);
+      if (fallbackRows.length > 0) {
+        return { rows: fallbackRows, compound: null, partialMatch: true };
+      }
+    }
+  }
+
+  // ── Synonym fallback ────────────────────────────────────────────────────
+  // Last resort: swap each meaningful word for a known synonym and retry.
+  // E.g. user types "soda" → no DB match → try "refresco" / "gaseosa".
+  // A Set guards against retrying the same term twice (no infinite loops).
+  const queriedTerms = new Set([normalize(entityValue)]);
+  const candidateTerms = entityValue.split(/\s+/).filter((w) => w.length >= 3);
+  for (const term of [entityValue, ...candidateTerms]) {
+    for (const syn of await getSynonymsByBusinessId(term, businessId)) {
+      if (queriedTerms.has(syn)) continue;
+      queriedTerms.add(syn);
+
+      // 1. Try as a product name / description match
+      const synRows = await queryProducts(syn, businessId);
+      if (synRows.length > 0) {
+        return { rows: synRows, compound: null, partialMatch: true };
+      }
+
+      // 2. Try the synonym as a category name and load its products.
+      //    E.g. dulce → postre → category "Postres" → Helado de fresa, Pastel...
+      try {
+        const catRows = await queryCategories(syn, businessId);
+        if (catRows.length > 0) {
+          const catProducts = await getProductosByCategory(businessId, catRows[0].name, PAGE_SIZE, 0);
+          if (catProducts.length > 0) {
+            return { rows: catProducts, compound: null, partialMatch: true };
+          }
+        }
+      } catch { /* ignore — category lookup is best-effort */ }
+    }
+  }
+
+  return { rows: [], compound: null, partialMatch: false };
+}
 
 /**
  * Executes the pipeline decision and returns the response text.
@@ -898,6 +1221,23 @@ async function executeDecision(decision, originalText, normalizedText, businessI
       // Standard attribute path: "algo con queso", "para madera", etc.
       const attributes = decision._attributes ?? [{ value: decision.entity.value, type: decision.entity.attributeType }];
       const { rows, strategy } = await searchByAttributes(attributes, businessId);
+
+      // Synonym fallback: attribute search found nothing, so try the attribute value
+      // as a product name through the synonym-aware pipeline.
+      // e.g. "algo con mazorca" → attribute="mazorca" → DB finds nothing →
+      //      queryProductsCompoundAware("mazorca") → synonym "elote" → found.
+      if (rows.length === 0 && attributes.length === 1) {
+        const attrTerm = attributes[0].value;
+        try {
+          const { rows: synRows, compound, partialMatch } = await queryProductsCompoundAware(attrTerm, businessId);
+          if (synRows.length > 0) {
+            if (compound) return formatCompoundQueryResponse(compound, synRows, 'entity+attribute');
+            if (partialMatch) return formatPartialMatchResponse(attrTerm, synRows);
+            return formatProductResponse(attrTerm, synRows);
+          }
+        } catch { /* synonym fallback is best-effort */ }
+      }
+
       return formatAttributeResponse(attributes, rows, strategy);
     } catch (err) {
       console.error('[Pipeline] Error in attribute search:', err.message);
@@ -961,9 +1301,17 @@ async function executeDecision(decision, originalText, normalizedText, businessI
   // Price-specific response: intent=precios + product entity (from message OR context)
   if (decision.intent === 'precios' && decision.entity?.type === 'product' && decision.entity?.value) {
     try {
-      const rows = await queryProducts(decision.entity.value, businessId);
+      const { rows, compound, partialMatch } = await queryProductsCompoundAware(decision.entity.value, businessId);
       if (rows.length === 0) {
         return `No encontré "${decision.entity.value}" en nuestro catálogo. ¿Quieres ver las opciones disponibles?`;
+      }
+      // Partial match (via word fallback): show related item instead of an exact price
+      if (partialMatch) {
+        return formatPartialMatchResponse(decision.entity.value, rows);
+      }
+      // Compound match with multiple results: list them so the user can narrow down.
+      if (compound && rows.length > 1) {
+        return formatCompoundQueryResponse(compound, rows, 'entity+attribute');
       }
       const p = rows[0];
       let response = `😊 ${p.name} tiene un precio de $${Number(p.price).toFixed(2)}.`;
@@ -983,14 +1331,40 @@ async function executeDecision(decision, originalText, normalizedText, businessI
       return '¡Claro! ¿Sobre qué producto o servicio te gustaría saber más?';
     }
     try {
-      const rows = await queryProducts(decision.entity.value, businessId);
+      const { rows } = await queryProductsCompoundAware(decision.entity.value, businessId);
       let response = formatDescripcionResponse(decision.entity.value, rows);
       if (rows.length > 0) {
         try {
           const attrsMap = await getProductAttributes([rows[0].id]);
           response += formatProductAttributes(attrsMap, rows[0].id);
         } catch { /* attributes are optional */ }
+        return response;
       }
+      // No product found — try matching against business services as a fallback
+      try {
+        const allServices = await getBusinessInfoByIntent('servicios', businessId);
+        const normQuery   = normalize(decision.entity.value);
+        let serviceMatch  = allServices.find((s) => {
+          const normName = normalize(s.name);
+          return normName.includes(normQuery) || normQuery.includes(normName);
+        });
+        if (!serviceMatch) {
+          const qWords = normQuery.split(/\s+/).filter((w) => w.length > 2);
+          serviceMatch = allServices.find((s) => {
+            const nameWords = new Set(normalize(s.name).split(/\s+/));
+            const overlap   = qWords.filter((w) => nameWords.has(w));
+            return qWords.length > 0 && overlap.length >= Math.ceil(qWords.length / 2);
+          });
+        }
+        if (serviceMatch) {
+          try {
+            const contactInfo = await getBusinessInfoByIntent('contacto', businessId);
+            return formatServiceWithContact(serviceMatch, contactInfo);
+          } catch {
+            return formatServiceDetail(serviceMatch);
+          }
+        }
+      } catch { /* service fallback is best-effort */ }
       return response;
     } catch (err) {
       console.error('[Pipeline] Error querying description:', err.message);
@@ -1058,11 +1432,24 @@ async function executeDecision(decision, originalText, normalizedText, businessI
       }
 
       try {
-        const rows = await queryProducts(decision.entity.value, businessId);
-        // Log queried products for analytics (fire-and-forget)
+        const { rows, compound, partialMatch } = await queryProductsCompoundAware(decision.entity.value, businessId);
+        // Log every specific product query as an individual event.
+        // Category and general catalog queries never reach this block — they are handled
+        // by the category branch above (decision.entity.type === 'category') or by the
+        // intent-only path, so no further filtering is needed here.
         const available = rows.filter((r) => r.is_available !== false);
         if (available.length > 0) {
           logProductQuery(businessId, available.map((r) => r.id));
+        }
+        // Compound entity (e.g. "hamburguesa con picante" from context after AI turn) →
+        // show filtered results using the attribute-aware format.
+        if (compound) {
+          return formatCompoundQueryResponse(compound, rows, 'entity+attribute');
+        }
+        // Partial match (e.g. "escuadra metalica" → found "Escuadra de 12\"") →
+        // use a "related products" message instead of the exact-match format.
+        if (partialMatch) {
+          return formatPartialMatchResponse(decision.entity.value, rows);
         }
         let response = formatProductResponse(decision.entity.value, rows);
         if (rows.length === 1) {
@@ -1076,6 +1463,14 @@ async function executeDecision(decision, originalText, normalizedText, businessI
         console.error('[Pipeline] Error querying product:', err.message);
       }
     }
+  }
+
+  // comprar_context: purchase pronoun referencing the confirmed context product.
+  // chatSocket.js checks this signal and triggers the purchase form (or contact info).
+  // The text here acts as a brief acknowledgment while the form loads.
+  if (decision.strategy === 'comprar_context') {
+    const productName = decision.entity?.value ?? 'ese producto';
+    return `¡Perfecto! 😊 Enseguida te ayudo con tu pedido de ${productName}.`;
   }
 
   // Post-result pronoun purchase phrase after a failed product lookup:
@@ -1151,18 +1546,25 @@ async function executeDecision(decision, originalText, normalizedText, businessI
  * @param {{ lastIntent: string|null, lastEntity: object }}        context
  * @returns {Promise<{ text: string, aiUsed: boolean, ragContext: object|null }>}
  */
-async function handleAIFallback(originalText, normalizedText, businessId, intentResult, entityResult, context) {
-  // Step 1: keyword responses always take priority (greetings, etc.)
-  const keyword = getKeywordResponse(originalText);
-  if (keyword) {
-    return { text: keyword, aiUsed: false, ragContext: null };
+async function handleAIFallback(originalText, normalizedText, businessId, intentResult, entityResult, context, sessionId = null) {
+  // Step 1: keyword responses (greetings, etc.) — only for short/standalone messages.
+  // A message like "hola que me recomiendas" contains "hola" as a prefix but is really
+  // an AI request, so we skip the keyword shortcut once the message exceeds 3 words.
+  const _kwWordCount = originalText.trim().split(/\s+/).length;
+  if (_kwWordCount <= 3) {
+    const keyword = getKeywordResponse(originalText);
+    if (keyword) {
+      return { text: keyword, aiUsed: false, ragContext: null };
+    }
   }
 
-  // Step 2: AI decision engine — should we even attempt AI?
+  // Step 2: AI decision engine — segunda comprobación (FLUJO_CHAT §3.4 PASO 2).
+  // shouldUseAI checks explicit AI signals (recommendations, comparisons, etc.)
+  // BEFORE the intent-score guard, so a high comprar score never blocks AI routing.
   const aiDecision = shouldUseAI(normalizedText, intentResult, entityResult, context);
 
   if (aiDecision.routing === 'backend') {
-    // Backend fallback — use the old mock response (no AI needed)
+    // Backend fallback — use the mock response (no AI needed for this message)
     const fallback = getMockOpenAIResponse(originalText, {
       lastProduct: context?.lastEntity?.value ?? null,
       lastIntent: context?.lastIntent ?? null,
@@ -1170,28 +1572,23 @@ async function handleAIFallback(originalText, normalizedText, businessId, intent
     return { text: fallback, aiUsed: false, ragContext: null };
   }
 
-  // Step 3: RAG filter — fetch only relevant data before sending to AI
-  const ragContext = await filterRelevantData(
-    normalizedText, businessId, intentResult, entityResult, context
-  );
-
-  // Step 4: Guard — if no relevant data, don't waste an AI call
-  if (!hasRelevantData(ragContext)) {
-    const fallback = getMockOpenAIResponse(originalText, {
-      lastProduct: context?.lastEntity?.value ?? null,
-      lastIntent: context?.lastIntent ?? null,
-    });
-    return { text: fallback, aiUsed: false, ragContext };
-  }
-
-  // Step 5: Simulated OpenAI call with RAG context
-  // In production: replace getRAGOpenAIResponse with actual OpenAI API call
-  const aiResponse = getRAGOpenAIResponse(originalText, ragContext, {
-    lastIntent: context?.lastIntent ?? null,
-    lastEntity: context?.lastEntity ?? null,
+  // Step 3–5: Subscription gate → RAG → Ollama (FLUJO_CHAT §3.4 PASO 4b–5).
+  // Delegate entirely to subscriptionController.handleAIGate which:
+  //   • Checks subscription plan (Lite → placeholder mock, Premium → continues)
+  //   • Runs RAG filter for Premium to fetch relevant business data
+  //   • Calls Ollama (llama3) with business context + RAG data
+  //   • Falls back to getRAGOpenAIResponse if Ollama is unavailable
+  const gateResult = await handleAIGate({
+    businessId,
+    originalText,
+    normalizedText,
+    intentResult,
+    entityResult,
+    context,
+    sessionId,
   });
 
-  return { text: aiResponse, aiUsed: true, ragContext };
+  return { text: gateResult.text, aiUsed: gateResult.aiUsed, ragContext: gateResult.ragContext };
 }
 
 // ─── Full pipeline ────────────────────────────────────────────────────────────
@@ -1206,23 +1603,57 @@ async function processMessage({ text, sessionId, businessId }) {
   // 1. Preprocess: normalize + expand abbreviations + correct typos
   const normalizedText = preprocessMessage(text);
 
+  // 1.5  Negation detection — captures "sin X", "no quiero X", "que no tenga X", etc.
+  //      Results are stored in Redis AFTER the response so they don't change routing
+  //      for _this_ turn, but ARE available from the next turn onward.
+  const negationInfo = detectNegation(normalizedText);
+
+  // 1.6  Multi-intent splitting — splits compound messages at Spanish connectors.
+  //      "cuánto cuesta la pizza y a qué hora abren?" → two independent segments.
+  //      When only one segment is returned the whole flow is a single-pass (normal).
+  const intentSegments = parseMultiIntent(normalizedText);
+  const isMultiIntent  = intentSegments.length > 1;
+
+  // ROOT-CAUSE FIX: when the message is multi-intent, the combined text
+  // (e.g. "cuanto cuesta la pizza hawaiana y que horarios tienen") causes
+  // entity-extraction regexes to greedily include connector words and the
+  // second clause ("pizza hawaiana y que horarios tienen" as the entity value).
+  // The DB lookup then fails → pipeline falls back to the STALE context entity
+  // (e.g. previous "Orden de Carnitas").
+  //
+  // Solution: run steps 2-6 (day/intent/entity detection + decision) on the
+  // PRIMARY segment only ("cuanto cuesta la pizza hawaiana"). Secondary
+  // segments are still processed inline after the primary response (see the
+  // multi-intent block below).
+  //
+  // Single-intent messages: primaryText === normalizedText (no change in behaviour).
+  const primaryText = isMultiIntent ? intentSegments[0].segment : normalizedText;
+
   // 2. Detect day entity (highest priority — skips DB lookup entirely)
-  const dayEntity = detectDay(normalizedText);
+  const dayEntity = detectDay(primaryText);
 
   // 3. Detect intent (scoring) — pass preprocessed text so typos are already corrected
-  const intentResult = detectIntent(normalizedText);
+  const intentResult = detectIntent(primaryText);
 
   // 4. Detect entities (DB lookup — skipped when day detected)
   const entityResult = dayEntity
     ? dayEntity
-    : await detectEntities(normalizedText, businessId, intentResult);
+    : await detectEntities(primaryText, businessId, intentResult);
 
   // 5. Get context from Redis
   const context = await getContext(businessId, sessionId);
 
   // 5b. Attribute follow-up: combine new attribute with previous search context
   // e.g. "algo con queso" → "y con pollo" → combine [queso, pollo]
+  //
+  // Guard: skip combination when the current message is a fresh standalone query.
+  // "tiene algo con pollo?" / "hay algo con pollo?" start a brand-new search
+  // and must NOT be merged with the prior attribute context.
+  // Only short follow-up forms like "y con pollo", "con queso", "tambien con jalapeño"
+  // should accumulate attributes.
+  const FRESH_ATTR_QUERY_RE = /\b(?:algo|alguna?|alguno?|productos?|hay|tienes?|tienen|busco|necesito)\b/;
   if (
+    !FRESH_ATTR_QUERY_RE.test(primaryText) &&
     entityResult.type === 'attribute' &&
     context.lastEntity?.type === 'attribute' &&
     Array.isArray(context.lastAttributes) &&
@@ -1241,16 +1672,47 @@ async function processMessage({ text, sessionId, businessId }) {
   }
 
   // 6. Make decision
-  const decision = decide(intentResult, entityResult, context, normalizedText);
+  const decision = decide(intentResult, entityResult, context, primaryText);
 
   // If we detected combined attributes, attach them to the decision
   if (entityResult._combinedAttributes) {
     decision._attributes = entityResult._combinedAttributes;
   }
 
+  // When the AI pre-screen fires, capture the most useful entity for context
+  // persistence so follow-up queries ("¿cuánto cuesta?", "y una con jalapeño") can
+  // refer back to what was discussed in this turn.
+  //
+  // Priority for base product:
+  //   1. Explicit product entity detected in the message (e.g. entityResult.value = 'hamburguesa')
+  //   2. Product entity already in context — for messages like "recomiéndame una con picante"
+  //      where no standalone product noun was in the message.
+  //
+  // If the message also carries a "con X" attribute constraint, encode it in the
+  // stored entity value ("hamburguesa con picante") so that follow-up Rule 4.8 and
+  // queryProductsCompoundAware can scope results to the specified attribute.
+  if (decision.strategy === 'ai') {
+    const aiBase =
+      (entityResult.type === 'product' && entityResult.value)
+        ? entityResult.value
+        : (context.lastEntity?.type === 'product' ? context.lastEntity.value : null);
+    if (aiBase) {
+      // Strip any previously stored " con X" compound from the base so we don't
+      // accumulate chains like "hamburguesa con queso con picante".
+      const cleanBase = aiBase.replace(/\s+con\s+.+$/, '').trim();
+      const CON_RE = /\bcon\s+([\w\u00f1][\w\u00f1\s]{1,25}?)(?:\s*\?)?$/;
+      const conMatch = CON_RE.exec(primaryText);
+      const attrSuffix = conMatch?.[1]?.trim() ?? null;
+      const entityValue = attrSuffix ? `${cleanBase} con ${attrSuffix}` : cleanBase;
+      decision._aiEntity = { type: 'product', value: entityValue };
+    }
+  }
+
   // Logging
   const logs = {
     normalizedText,
+    primaryText:   isMultiIntent ? primaryText : undefined,
+    isMultiIntent,
     intentScores: intentResult.scores,
     intentWinner: intentResult.intent,
     intentScore: intentResult.score,
@@ -1272,14 +1734,26 @@ async function processMessage({ text, sessionId, businessId }) {
   if (decision.strategy === 'ai') {
     // Hybrid AI path: decision engine + RAG filter + simulated OpenAI
     const aiResult = await handleAIFallback(
-      text, normalizedText, businessId, intentResult, entityResult, context
+      text, primaryText, businessId, intentResult, entityResult, context, sessionId
     );
     replyText = aiResult.text;
     aiUsed = aiResult.aiUsed;
     ragContext = aiResult.ragContext;
+
+    // Cuando llama3 respondió (Premium), identificar el producto específico mencionado
+    // escaneando la respuesta contra los datos RAG. Permite que preguntas de seguimiento
+    // ("cuánto cuesta?", "qué incluye?") resuelvan el producto exacto.
+    if (aiUsed && ragContext?.type === 'products' && Array.isArray(ragContext.data) && ragContext.data.length > 0) {
+      const normReply = normalize(replyText);
+      const sorted = [...ragContext.data].sort((a, b) => b.name.length - a.name.length);
+      const mentioned = sorted.find((p) => normReply.includes(normalize(p.name)));
+      if (mentioned) {
+        decision._aiEntity = { type: 'product', value: normalize(mentioned.name) };
+      }
+    }
   } else {
-    // Deterministic backend path
-    replyText = await executeDecision(decision, text, normalizedText, businessId, context, sessionId);
+    // ── Ruta determinista: intents + contexto + valores ────────────────────────
+    replyText = await executeDecision(decision, text, primaryText, businessId, context, sessionId);
   }
 
   // Enrich logs with AI routing info
@@ -1299,11 +1773,16 @@ async function processMessage({ text, sessionId, businessId }) {
     contextUpdate = decision._ctxOverride;
   } else {
     contextUpdate = buildContextUpdate(decision);
-    // entity strategy: _rows comes directly from detectEntities
+    // entity strategy: _rows comes directly from detectEntities.
+    // Also guard with reply text: executeDecision may find the product via a
+    // compound/fuzzy fallback (queryProductsCompoundAware) even when _rows is
+    // empty. In that case the reply is positive, so we must NOT mark it as missed.
     const entityMissedViaDirect =
       decision.strategy === 'entity' &&
       decision.entity?.type === 'product' &&
-      entityResult._rows?.length === 0;
+      entityResult._rows?.length === 0 &&
+      typeof replyText === 'string' &&
+      replyText.toLowerCase().includes('no encontr');
     // followup / context strategies: entity came from context/follow-up logic,
     // not from detectEntities, so _rows is undefined. Infer miss from reply text.
     // Both formatProductResponse and formatDescripcionResponse emit a variant:
@@ -1325,10 +1804,83 @@ async function processMessage({ text, sessionId, businessId }) {
     await updateContext(businessId, sessionId, contextUpdate);
   }
 
+  // ── Multi-intent: process secondary segments inline ───────────────────────
+  // When the message was split at a connector (e.g. "cuánto cuesta X y
+  // a qué hora abren?"), each secondary segment is run through the pipeline
+  // independently using fresh context (updated by the primary segment above).
+  // Responses are joined with a natural Spanish bridge phrase.
+  if (isMultiIntent) {
+    const allResponses = [{ text: replyText, connectorType: 'primary' }];
+
+    for (let i = 1; i < intentSegments.length; i++) {
+      const { segment, connectorType } = intentSegments[i];
+      try {
+        // Each segment was already normalised by parseMultiIntent (it received
+        // the already-preprocessed normalizedText as input).
+        const segDay    = detectDay(segment);
+        const segIntent = detectIntent(segment);
+        const segEntity = segDay
+          ? segDay
+          : await detectEntities(segment, businessId, segIntent);
+
+        // Use fresh context — updated by previous segment processing
+        const freshCtx = await getContext(businessId, sessionId);
+
+        const segDecision = decide(segIntent, segEntity, freshCtx, segment);
+
+        // Propagate combined attributes from secondary segment if applicable
+        if (segEntity._combinedAttributes) {
+          segDecision._attributes = segEntity._combinedAttributes;
+        }
+
+        const segReply = await executeDecision(
+          segDecision, segment, segment, businessId, freshCtx, sessionId
+        );
+
+        allResponses.push({ text: segReply, connectorType });
+
+        // Persist context update for this secondary segment
+        const segCtxUpdate = buildContextUpdate(segDecision);
+        if (Object.keys(segCtxUpdate).length > 0) {
+          await updateContext(businessId, sessionId, segCtxUpdate);
+        }
+      } catch (err) {
+        console.error('[Pipeline] Multi-intent segment error:', segment, err.message);
+      }
+    }
+
+    if (allResponses.length > 1) {
+      replyText = allResponses[0].text;
+      for (let i = 1; i < allResponses.length; i++) {
+        replyText = joinResponses(replyText, allResponses[i].text, allResponses[i].connectorType);
+      }
+    }
+  }
+
+  // ── Turn memory: push this turn to topicMemory ring buffer ───────────────
+  // Stored AFTER the response so `found` reflects the real DB outcome.
+  try {
+    await pushTurnMemory(businessId, sessionId, {
+      intent: decision.intent,
+      entity: decision.entity ?? { type: null, value: null },
+      found:  contextUpdate.lastEntityFound !== false,
+      ts:     Date.now(),
+    });
+  } catch { /* non-fatal */ }
+
+  // ── Negation: persist rejected terms to Redis ─────────────────────────────
+  if (negationInfo.hasNegation) {
+    for (const term of negationInfo.negatedTerms) {
+      try {
+        await addRejectedEntity(businessId, sessionId, term);
+      } catch { /* non-fatal */ }
+    }
+  }
+
   return { replyText, decision, logs };
 }
 
-module.exports = {
+export {
   processMessage,
   decide,
   buildContextUpdate,

@@ -34,7 +34,8 @@ const ForgotPassword = () => {
             </p>
             <p style={{ textAlign: 'center', fontSize: '.875rem', color: 'var(--text-2)' }}>
               Si el correo está registrado recibirás un enlace para restablecer tu contraseña en los
-              próximos minutos. Revisa también la carpeta de spam.
+              próximos minutos. Revisa también la carpeta de spam. 
+              De lo contrario, por favor revisa que lo hayas escrito correctamente o contacta al soporte. Gracias.
             </p>
             <Link to="/login" className="register-link" style={{ textAlign: 'center', display: 'block' }}>
               Volver al inicio de sesión

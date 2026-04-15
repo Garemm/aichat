@@ -1,6 +1,6 @@
 # LLM Chat AI — Documentación del Proyecto (Chat)
 
-> Última actualización: 3 de abril de 2026 — Sprint 20 (voz STT+TTS, pronunciación de precios, intent comprar, email/phone/webpage_link en negocios)
+> Última actualización: 15 de abril de 2026 — Sprint 21+ (multi-intent parser, intentDetector scoring, intentExpanderService, contacto intent, descripcion intent, pedidos flow, Groq STT)
 > Estado: desarrollo activo
 > Archivo: `documentacionChat.md`
 
@@ -23,10 +23,15 @@ El usuario escribe mensajes en español coloquial a través de una interfaz Reac
 - Muestra promociones vigentes y ubicación del negocio
 - Mantiene contexto multi-turno ("¿y cuánto cuesta?" después de preguntar por un producto)
 - Preguntas generales sobre el catálogo ("que productos tienes", "que vendes") resetean el contexto previo de producto — nunca heredan la entidad anterior
-- **Flujo híbrido IA:** recomendaciones ("que me recomiendas"), comparaciones ("X vs Y"), superlativos ("la más barata", "la mejor"), preguntas de capacidad nutricional — ruteados a OpenAI con contexto RAG filtrado
+- **Flujo híbrido IA:** recomendaciones ("que me recomiendas"), comparaciones ("X vs Y"), superlativos ("la más barata", "la mejor"), preguntas de capacidad nutricional — ruteados a Ollama (LLM local) con contexto RAG filtrado
 - Degrada elegantemente si Redis no está disponible (in-memory fallback automático)
-- Responde preguntas sobre cómo comprar o hacer pedidos (`comprar` intent, standalone): muestra si el negocio tiene tienda en línea (`webpage_link`), ciudad y descripción; reconoce ~22 frases ("quiero comprar", "como hago un pedido", "tienen tienda en línea", etc.)
-- **Voz (STT + TTS):** dictado por voz (Speech Recognition) y lectura automática de respuestas del bot (Speech Synthesis) usando APIs nativas del navegador — sin dependencias externas, privacidad total (ningún audio sale del dispositivo); compatible con iOS Safari, Chrome Desktop y Chrome Android
+- Responde preguntas sobre cómo comprar o hacer pedidos (`comprar` intent): muestra si el negocio acepta pedidos (`acepto_pedidos`) y abre formulario de pedido en el frontend; si no acepta pedidos, muestra información de contacto
+- **Contacto** (`contacto` intent): informa teléfono, email y página web del negocio
+- **Descripción** (`descripcion` intent): detalla características de un producto o servicio específico usando 6 patrones de prioridad antes del scoring para evitar colisiones de substrings
+- **Multi-intent:** el parser `multiIntentParser.js` divide mensajes compuestos ("¿cuáles son sus horarios y qué productos tienen?") en segmentos independientes; cada uno se procesa por separado y las respuestas se unen coherentemente
+- **Expansión morfológica de intents:** `intentExpanderService.js` expande el diccionario con 6 reglas (plurales, conjugaciones verbales, variantes de género, sinónimos) — resultado guardado en Redis con TTL 7 días para arranques rápidos
+- **Voz (STT + TTS):** dictado por voz (Web Speech API) y lectura automática de respuestas; transcripción por Groq/Whisper vía `POST /api/transcribe` como fallback cuando el navegador no soporta `SpeechRecognition`; compatible con iOS Safari, Chrome Desktop y Chrome Android
+- **Formulario de pedido:** `OrderForm.jsx` captura nombre, teléfono y detalle del pedido; se persiste en la tabla `pedidos` de PostgreSQL y notifica al panel admin en tiempo real vía Socket.io
 
 ---
 
@@ -83,15 +88,25 @@ aichat/
 │   │   │   ├── conversationalContext.js
 │   │   │   ├── dayDetector.js
 │   │   │   ├── entityDetector.js
-│   │   │   ├── intentDetector.js
+│   │   │   ├── intentDetector.js          ← ★ detección por scoring ponderado
+│   │   │   ├── intentExpanderService.js   ← ★ expansión morfológica → Redis
 │   │   │   ├── intentResponseFormatter.js
-│   │   │   ├── messagePipeline.js
+│   │   │   ├── intentService.js           ← LEGACY (solo tests)
+│   │   │   ├── messagePipeline.js         ← ★ orquestador central NLP
 │   │   │   ├── messageService.js
-│   │   │   ├── nlpEntityExtractor.js
+│   │   │   ├── multiIntentParser.js       ← ★ divide mensajes compuestos
+│   │   │   ├── nlpEntityExtractor.js      ← LEGACY
 │   │   │   ├── normalize.js
+│   │   │   ├── ollamaService.js           ← integración Ollama LLM
+│   │   │   ├── queryLogService.js         ← log consultas de productos
 │   │   │   ├── ragFilterService.js
-│   │   │   ├── sessionContextService.js
-│   │   │   └── textPreprocessor.js
+│   │   │   ├── redisService.js            ← módulo único de operaciones Redis
+│   │   │   ├── sessionContextService.js   ← re-export de redisService
+│   │   │   ├── synonyms.js                ← lookup de sinónimos entre categorías
+│   │   │   ├── textPreprocessor.js
+│   │   │   └── userProfileService.js      ← perfil usuario Redis Hash TTL 30d
+│   │   ├── controllers/
+│   │   │   └── transcribeController.js    ← POST /api/transcribe → Groq/Whisper
 │   │   ├── sockets/
 │   │   │   └── chatSocket.js
 │   │   └── temp/
@@ -99,15 +114,16 @@ aichat/
 │   └── tests/
 │       ├── setup.js
 │       └── unit/
+│           ├── attributeSearch.test.js
 │           ├── businessInfoService.test.js
 │           ├── conversationalFlow.test.js
 │           ├── dayDetector.test.js
 │           ├── entityDetector.test.js
 │           ├── hybridFlow.test.js
+│           ├── intentExpanderService.test.js  ← NUEVO
 │           ├── intentResponseFormatter.test.js
-│           ├── intentService.test.js
+│           ├── intentService.test.js          ← incluye detectMultipleIntents
 │           ├── keywordResponses.test.js
-│           ├── attributeSearch.test.js
 │           ├── messageModel.test.js
 │           ├── mockOpenAI.test.js
 │           ├── nlpEntityExtractor.test.js
@@ -562,23 +578,70 @@ Extrae entidades de tipo `product` o `category` del mensaje usando:
 4. Consulta PostgreSQL con `ILIKE` para confirmar que el candidato existe en la BD
 5. Exporta `formatProductResponse(entity, rows)` y `formatCategoryResponse(category, rows)` con listas estructuradas
 
-### `intentDetector.js`
-Scoring de keywords contra `intents.js`. Cada keyword tiene un `weight`. El intent ganador es el de mayor suma de pesos, si supera `MIN_CONFIDENCE = 1`. Exporta `isStandaloneIntent(key)` para distinguir intents que no necesitan entidad (`horarios`, `ubicacion`, `promociones`).
+### `intentDetector.js` ★
+**Reemplaza al antiguo `intentService.js`** basado en `includes()` simple. Scoring ponderado de keywords contra el diccionario activo de intents.
+
+**Flujo:**
+1. Normaliza con `normalize()`
+2. Ejecuta 6 `DESCRIPCION_PRIORITY_PATTERNS` (regex) **antes** del scoring para evitar colisión de substrings
+3. Para cada intent, suma pesos de las keywords que aparecen en el texto
+4. Gana el intent con mayor score (empate: gana el de menor cantidad de matches — más específico)
+5. `MIN_CONFIDENCE = 1` — mínimo para considerar un intent detectado
+
+**Diccionario activo (prioridad):** arg explícito → `_activeIntents` Redis → `intents.js` estático
+
+**Exports:**
+```js
+detectIntent(message, intentsConfig?) → { intent, score, scores, confident }
+scoreIntents(text, intentsConfig?)    → Record<intent, number>
+isStandaloneIntent(key)               → boolean
+initIntents()                         → Promise<void>   // carga desde Redis en startup
+detectMultipleIntents(message)        → [{ intent, score }]
+```
+
+### `intentExpanderService.js` ★
+**Expande morfológicamente el diccionario** `intents.js` y guarda el resultado en Redis con TTL 7 días. Se ejecuta una única vez al arrancar el servidor (`bootstrapIntents()` en `server.js`).
+
+**6 reglas de derivación:**
+| Regla | Descripción | Ejemplo |
+|-------|-------------|--------|
+| R1 PLURAL_VOCAL | sustantivo terminado en vocal → +s | precio → precios |
+| R2 PLURAL_CONS | terminado en consonante (no s/x/z) → +es | canal → canales |
+| R3 PLURAL_Z | terminado en "z" → "ces" (solo weight=1) | vez → veces |
+| R4 VERB_PERSON | grupos de conjugación presente: tiene/tienen/tienes, vende/venden/vendes, etc. | tiene → tienen/tienes |
+| R5 GENDER_ARTICLE | pares el/la, un/una, los/las, ese/esa, etc. | el → la |
+| R6 NOUN_SYNONYMS | sinónimos de palabras sueltas (weight≤2): precio→costo/tarifa, telefono→celular/movil | precio → costo |
+
+**Exports:** `bootstrapIntents()`, `expandIntents(dict)`, `expandKeywords(keywords)`, `expandPhrase(phrase, weight)`, `toPlural(word)`, `VERB_GROUPS`, `GENDER_TOKEN_PAIRS`, `WORD_SYNONYMS`
+
+### `multiIntentParser.js` ★
+**Detecta y divide mensajes compuestos** en segmentos independientes para procesarlos por separado.
+
+**Conectores reconocidos:** `primary` (primera parte), `additive` ("y", "también", "además"), `alternative` ("o", "o también"), `contrastive` ("pero", "aunque", "sin embargo")
+
+**Reglas conservadoras:**
+- Solo divide si el lado derecho tiene señal semántica independiente (`SIGNAL_WORDS` ~80+ palabras)
+- Conectores débiles ("y", "o") requieren señal en AMBOS lados
+- Mensajes cortos (≤7 palabras) requieren evidencia fuerte
+- Compuestos de producto ("sal y pimienta") NO se dividen
+- `MAX_SPLITS = 3`
+
+**Exports:** `parseMultiIntent(text) → [{segment, connectorType}]`, `joinResponses(first, second, connectorType) → string`
 
 ### `intents.js`
-Árbol de 6 intenciones. Cada intent incluye `standalone: bool` y `keywords[]` con `{ phrase, weight }`. Los pesos tipicamente son 1–3; frases muy específicas como `"abren toda la semana"` tienen peso 3 para ganar siempre sobre palabras sueltas.
-
-**Intents disponibles:** `horarios`, `productos`, `precios`, `promociones`, `ubicacion`, `servicios`, `comprar`
+Diccionario de **9 intenciones**. Cada intent incluye `standalone: bool` y `keywords[]` con `{ phrase, weight }`. Los pesos son 1–3; frases específicas como `"abren toda la semana"` tienen peso 3.
 
 | Intent | standalone | Notas |
 |--------|-----------|-------|
 | `horarios` | `true` | Incluye formas tuteo: `abres`, `cierras`, `cuando abres` |
-| `productos` | `false` | `productos disponibles` (w2), `ver catalogo` (w2), `productos` (w1) — evita fallos al responder al menú del bot |
+| `productos` | `false` | `productos disponibles` (w2), `ver catalogo` (w2), `productos` (w1) |
 | `precios` | `false` | Hereda entidad de contexto cuando no hay producto en el mensaje |
 | `promociones` | `true` | |
 | `ubicacion` | `true` | |
-| `servicios` | `true` | `que servicios ofrecen/tienen/manejan` (w3), `servicios disponibles` (w2), `servicios`/`servicio` (w1). Estas frases fueron **movidas** desde `productos` donde causaban conflicto de enrutamiento. |
-| `comprar` | `true` | ~22 keywords: "quiero comprar" (w3), "como compro" (w3), "tienda en linea" (w2), "pedido" (w1), etc. Responde con `webpage_link` + ciudad + descripción del negocio. |
+| `servicios` | `false` | `que servicios ofrecen/tienen/manejan` (w3), `servicios disponibles` (w2) |
+| `comprar` | `true` | ~22 keywords; abre `OrderForm.jsx` si `acepto_pedidos = true`, sino muestra contacto |
+| `contacto` | `true` | teléfono, email y página web del negocio |
+| `descripcion` | `false` | 6 patrones DESCRIPCION_PRIORITY_PATTERNS antes del scoring para evitar colisiones |
 
 ### `intentResponseFormatter.js`
 Formateadores que convierten filas de la BD en texto con `\n`. Usa el helper interno `formatList(title, items)` que produce:
@@ -1126,7 +1189,7 @@ Feature de voz completo usando únicamente APIs nativas del navegador. **Privaci
 
 ## 7. Testing
 
-**795 pruebas** en **15 suites** — todas pasan (`npm test`).
+**1095 pruebas** en **18 suites** — todas pasan (`npm test`).
 
 ### Ejecutar los tests
 
@@ -1137,18 +1200,28 @@ npm run test:watch       # Modo interactivo
 npm run test:coverage    # Reporte HTML en ./coverage/
 ```
 
+### Cobertura (sprint actual)
+
+| Módulo | Statements | Branches | Notas |
+|--------|-----------|----------|-------|
+| `intentDetector.js` | ~82% | — | incluye detectMultipleIntents + descripcion patterns |
+| `intentExpanderService.js` | ~90% | — | 6 reglas morfológicas cubiertas |
+| `multiIntentParser.js` | ~96% | — | |
+| `intentResponseFormatter.js` | ~57% | — | formatters parcialmente cubiertos |
+
 ### Suites
 
 | Archivo | Módulo cubierto | Aprox. casos |
 |---|---|---|
 | `attributeSearch.test.js` | buildAttributeConditions, searchByAttribute(s), formatAttributeResponse | ~20 |
-| `businessInfoService.test.js` | QUERY_MAP (6 intents), despacho, errores BD | ~13 |
-| `conversationalFlow.test.js` | Pipeline multi-turno, decide() (incl. Regla 2.5), buildContextUpdate(), paginación, extractFollowUpEntity, follow-up con artículo, catálogo general vs contexto | ~177 |
+| `businessInfoService.test.js` | QUERY_MAP (9 intents), despacho, errores BD | ~13 |
+| `conversationalFlow.test.js` | Pipeline multi-turno, decide() (incl. Regla 2.5), buildContextUpdate(), paginación, extractFollowUpEntity, follow-up con artículo | ~177 |
 | `dayDetector.test.js` | Detección de 7 días, word-boundary, sin match | ~15 |
 | `entityDetector.test.js` | 21 patrones regex, blocklist, formatters, TIPO_DE_RE | ~55 |
-| `hybridFlow.test.js` | shouldUseAI(), hasRelevantData(), classifyAIRequest(), filterRelevantData(), handleAIFallback(), processMessage(), regresiones de enrutamiento | ~88 |
-| `intentResponseFormatter.test.js` | formatList, 6 formatters (incl. servicios), formatProductAttributes, formatServiceDetail | ~35 |
-| `intentService.test.js` | 6 intents, scoring, edge cases, formas tu-persona, servicios | ~84 |
+| `hybridFlow.test.js` | shouldUseAI(), hasRelevantData(), classifyAIRequest(), filterRelevantData(), handleAIFallback(), processMessage() | ~88 |
+| `intentExpanderService.test.js` | toPlural(), expandPhrase(), expandKeywords(), expandIntents(), VERB_GROUPS/GENDER_TOKEN_PAIRS/WORD_SYNONYMS | ~57 |
+| `intentResponseFormatter.test.js` | formatList, 8 formatters (incl. servicios, contacto, comprar), formatProductAttributes, formatServiceDetail | ~35 |
+| `intentService.test.js` | 9 intents (scoring, edge cases, formas tu-persona), detectMultipleIntents, descripcion priority patterns | ~109 |
 | `keywordResponses.test.js` | Keywords, sin match, guards | ~16 |
 | `messageModel.test.js` | create(), findByRoom(), clear() | ~10 |
 | `mockOpenAI.test.js` | getMockOpenAIResponse, getRAGOpenAIResponse | ~25 |

@@ -1,5 +1,5 @@
 // ── Admin Model ──────────────────────────────────────────────────────────────
-const db = require('../config/database');
+import db from '../config/database.js';
 
 const AdminModel = {
   /**
@@ -8,9 +8,16 @@ const AdminModel = {
    */
   async findByUsernameForAuth(username) {
     const { rows } = await db.query(
-      `SELECT id, username, password, business_id
-       FROM admins
-       WHERE username = $1`,
+      `SELECT a.id, a.username, a.password, a.business_id,
+              b.is_active,
+              pt.dashboard, pt.pedidos, pt.productos, pt.categorias,
+              pt.importar_productos, pt.servicios, pt.promociones, pt.horarios,
+              pt.mi_haychat, pt.mi_negocio, pt.mi_webpage, pt.suscripciones
+       FROM admins a
+       JOIN businesses b ON b.id = a.business_id
+       LEFT JOIN subscriptions s ON s.id = b.subscription_id
+       LEFT JOIN permissions_types pt ON pt.id = s.tipo_permiso
+       WHERE a.username = $1`,
       [username]
     );
     return rows[0] || null;
@@ -95,8 +102,16 @@ const AdminModel = {
    */
   async findById(adminId) {
     const { rows } = await db.query(
-      `SELECT id, username, business_id, refresh_token_hash
-       FROM admins WHERE id = $1`,
+      `SELECT a.id, a.username, a.business_id, a.refresh_token_hash,
+              b.is_active,
+              pt.dashboard, pt.pedidos, pt.productos, pt.categorias,
+              pt.importar_productos, pt.servicios, pt.promociones, pt.horarios,
+              pt.mi_haychat, pt.mi_negocio, pt.mi_webpage, pt.suscripciones
+       FROM admins a
+       JOIN businesses b ON b.id = a.business_id
+       LEFT JOIN subscriptions s ON s.id = b.subscription_id
+       LEFT JOIN permissions_types pt ON pt.id = s.tipo_permiso
+       WHERE a.id = $1`,
       [adminId]
     );
     return rows[0] || null;
@@ -136,4 +151,4 @@ const AdminModel = {
   },
 };
 
-module.exports = AdminModel;
+export default AdminModel;

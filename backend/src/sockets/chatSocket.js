@@ -20,15 +20,18 @@
  *   that messages persist across page reloads and reconnects.
  */
 
-const { Server } = require('socket.io');
-const MessageService    = require('../services/messageService');
-const { processMessage } = require('../services/messagePipeline');
-const { CLIENT_URL }    = require('../config/env');
-const { getContext, updateContext, SESSION_TTL_SECONDS } = require('../services/sessionContextService');
-const { getHistory, saveMessage: redisSaveMessage } = require('../services/redisService');
-const { getCategories } = require('../services/businessInfoService');
-const { formatList }    = require('../services/intentResponseFormatter');
-const BusinessModel     = require('../models/businessModel');
+import { Server } from 'socket.io';
+import MessageService from '../services/messageService.js';
+import { processMessage } from '../services/messagePipeline.js';
+import { CLIENT_URL } from '../config/env.js';
+import { getContext, updateContext, SESSION_TTL_SECONDS } from '../services/sessionContextService.js';
+import { getHistory, saveMessage as redisSaveMessage } from '../services/redisService.js';
+import { recordVisit, saveName } from '../services/userProfileService.js';
+import { getCategories } from '../services/businessInfoService.js';
+import { formatList } from '../services/intentResponseFormatter.js';
+import BusinessModel from '../models/businessModel.js';
+import PedidoModel from '../models/pedidoModel.js';
+import { randomUUID } from 'crypto';
 
 /** Milliseconds of inactivity before sending the re-engagement message.
  *  Matches SESSION_TTL_SECONDS so the message fires exactly when Redis context expires. */
@@ -72,7 +75,7 @@ function resetIdleTimer(sessionId, roomId, businessId) {
 
       const botTimestamp = new Date().toISOString();
       const botMsg = {
-        id:        require('crypto').randomUUID(),
+        id:        randomUUID(),
         roomId,
         sender:    'Bot',
         text:      replyText,
@@ -108,6 +111,10 @@ const initSocket = (httpServer) => {
       origin: CLIENT_URL,
       methods: ['GET', 'POST'],
     },
+    // Ollama can take up to 120 s — keep the connection alive longer than that.
+    // default pingTimeout=20s would disconnect the socket while waiting for the model.
+    pingTimeout:  150_000,   // 150 s — must exceed OLLAMA_TIMEOUT_MS (120 s)
+    pingInterval:  10_000,   // ping every 10 s so real disconnects are detected quickly
   });
 
   io.on('connection', (socket) => {
@@ -116,7 +123,14 @@ const initSocket = (httpServer) => {
     // ── Join a room ──────────────────────────────────────────────────────────
     socket.on('join_room', async ({ roomId, businessId, sessionId } = {}) => {
       if (!roomId) return;
+
+      // Guard: skip if this socket already joined this exact room (duplicate
+      // join_room emitted by the same client — race condition / React re-render).
+      if (socket.rooms.has(roomId) && socket._lastJoinedRoom === roomId) {
+        return;
+      }
       socket.join(roomId);
+      socket._lastJoinedRoom = roomId;
       console.log(`[Socket] ${socket.id} joined room: ${roomId}`);
 
       // Load history from Redis when sessionId is available; fall back to
@@ -144,7 +158,7 @@ const initSocket = (httpServer) => {
             `• Cómo contactarnos o comprar\n\n` +
             `¡Es un placer atenderte! 😊`;
           const welcomeMsg = {
-            id:        require('crypto').randomUUID(),
+            id:        randomUUID(),
             sender:    'Bot',
             text:      welcomeText,
             timestamp: new Date().toISOString(),
@@ -182,11 +196,14 @@ const initSocket = (httpServer) => {
         // Track which sessionId this socket is using (needed for disconnect cleanup)
         socketSessions.set(socket.id, sessionId);
 
+        // Record activity in user profile (increments visitCount, updates lastSeen)
+        recordVisit(businessId, sessionId).catch(() => {});
+
         const userTimestamp = new Date().toISOString();
 
         // 1. Build and emit user message (shape matches history entries)
         const message = {
-          id:        require('crypto').randomUUID(),
+          id:        randomUUID(),
           roomId,
           sender,
           text,
@@ -204,17 +221,20 @@ const initSocket = (httpServer) => {
         });
 
         // 3. Process through NLP pipeline
-        const { replyText } = await processMessage({
-          text,
-          sessionId,
-          businessId,
-        });
+        // Signal to all room members that the bot is working on a response
+        io.to(roomId).emit('user_typing', { sender: 'Bot' });
+        let replyText, pipelineDecision;
+        try {
+          ({ replyText, decision: pipelineDecision } = await processMessage({ text, sessionId, businessId }));
+        } finally {
+          io.to(roomId).emit('user_stop_typing', { sender: 'Bot' });
+        }
 
         const botTimestamp = new Date().toISOString();
 
         // 4. Build and emit bot response
         const botMsg = {
-          id:        require('crypto').randomUUID(),
+          id:        randomUUID(),
           roomId,
           sender:    'Bot',
           text:      replyText,
@@ -230,6 +250,25 @@ const initSocket = (httpServer) => {
           text:      replyText,
           timestamp: botTimestamp,
         });
+
+        // 6a. If pipeline detected a purchase-pronoun referencing a confirmed context product,
+        //     check acepto_pedidos and trigger the purchase form (or contact info).
+        if (pipelineDecision?.strategy === 'comprar_context' && pipelineDecision.entity?.value) {
+          try {
+            const info = await PedidoModel.getOrderStatus(businessId);
+            if (info?.acepto_pedidos) {
+              socket.emit('mostrar_formulario_pedido', { businessId });
+            } else {
+              socket.emit('info_contacto', {
+                mensaje:  `Me alegra tu interés en "${pipelineDecision.entity.value}". En este momento no aceptamos pedidos en línea. Puedes contactarnos:`,
+                telefono: info?.phone ?? null,
+                email:    info?.email ?? null,
+              });
+            }
+          } catch (err) {
+            console.error('[Socket] comprar_context trigger error:', err.message);
+          }
+        }
 
         // 6. Reset idle timer — clock starts from the last bot reply
         resetIdleTimer(sessionId, roomId, businessId);
@@ -247,6 +286,109 @@ const initSocket = (httpServer) => {
     socket.on('stop_typing', ({ roomId, sender }) => {
       socket.to(roomId).emit('user_stop_typing', { sender });
     });
+
+    // ── Solicitar compra ─────────────────────────────────────────────────────
+    // Client emits this when the user wants to place an order.
+    // Server checks acepto_pedidos and emits either:
+    //   'mostrar_formulario_pedido' — purchase orders are enabled
+    //   'info_contacto'             — orders are disabled, return contact info
+    socket.on('solicitar_compra', async ({ businessId } = {}) => {
+      if (!businessId || typeof businessId !== 'number') {
+        socket.emit('error', { message: 'businessId requerido' });
+        return;
+      }
+      try {
+        const info = await PedidoModel.getOrderStatus(businessId);
+        if (!info) {
+          socket.emit('error', { message: 'Negocio no encontrado' });
+          return;
+        }
+        if (info.acepto_pedidos) {
+          socket.emit('mostrar_formulario_pedido', { businessId });
+        } else {
+          socket.emit('info_contacto', {
+            mensaje:  'En este momento no estamos aceptando pedidos en línea. Puedes contactarnos directamente:',
+            telefono: info.phone  ?? null,
+            email:    info.email  ?? null,
+          });
+        }
+      } catch (err) {
+        console.error('[Socket] solicitar_compra error:', err.message);
+        socket.emit('error', { message: 'Error al verificar disponibilidad de pedidos.' });
+      }
+    });
+
+    // ── Enviar pedido ────────────────────────────────────────────────────────
+    // Client emits this when the user submits the order form.
+    // Server validates, inserts into DB, and emits 'pedido_confirmado' with
+    // the full pedido data so the frontend can display a persistent receipt card.
+    socket.on('enviar_pedido', async ({
+      businessId,
+      sessionId,
+      nombreCliente,
+      telefono,
+      detallePedido,
+    } = {}) => {
+      // ── Input validation ──────────────────────────────────────────────────
+      if (!businessId || typeof businessId !== 'number') {
+        socket.emit('pedido_error', { message: 'businessId requerido' });
+        return;
+      }
+      if (!nombreCliente || typeof nombreCliente !== 'string' || !nombreCliente.trim()) {
+        socket.emit('pedido_error', { message: 'Nombre del cliente requerido' });
+        return;
+      }
+      if (!telefono || typeof telefono !== 'string' || !telefono.trim()) {
+        socket.emit('pedido_error', { message: 'Teléfono requerido' });
+        return;
+      }
+      if (!detallePedido || typeof detallePedido !== 'string' || !detallePedido.trim()) {
+        socket.emit('pedido_error', { message: 'Detalle del pedido requerido' });
+        return;
+      }
+      if (nombreCliente.trim().length > 150) {
+        socket.emit('pedido_error', { message: 'Nombre demasiado largo (máx. 150 caracteres)' });
+        return;
+      }
+      if (telefono.trim().length > 50) {
+        socket.emit('pedido_error', { message: 'Teléfono demasiado largo (máx. 50 caracteres)' });
+        return;
+      }
+
+      try {
+        const pedido = await PedidoModel.createPedido({
+          businessId,
+          sessionId:     sessionId ?? null,
+          nombreCliente: nombreCliente.trim(),
+          telefono:      telefono.trim(),
+          detallePedido: detallePedido.trim(),
+        });
+
+        // Persist the user's name to their long-term profile so the AI can
+        // greet them by name in future messages ("Hola de nuevo, Carlos")
+        if (sessionId) {
+          saveName(businessId, sessionId, nombreCliente).catch(() => {});
+        }
+
+        // Emit the full pedido row so the client can display a persistent receipt card.
+        socket.emit('pedido_confirmado', {
+          id:            pedido.id,
+          fecha:         pedido.fecha,
+          aceptado:      pedido.aceptado,
+          nombreCliente: pedido.nombre_cliente,
+          telefono:      pedido.telefono,
+          detallePedido: pedido.detalle_pedido,
+          notasAdmin:    pedido.notas_admin ?? null,
+          liberado:      pedido.liberado,
+          rechazado:     pedido.rechazado,
+        });
+      } catch (err) {
+        console.error('[Socket] enviar_pedido error:', err.message, err.stack?.split('\n')[1] ?? '');
+        socket.emit('pedido_error', { message: 'Error al registrar el pedido. Por favor intenta de nuevo.' });
+      }
+    });
+
+
 
     // ── Disconnect ───────────────────────────────────────────────────────────
     socket.on('disconnect', () => {
@@ -276,5 +418,5 @@ const getIO = () => {
   return io;
 };
 
-module.exports = { initSocket, getIO };
+export { initSocket, getIO };
 

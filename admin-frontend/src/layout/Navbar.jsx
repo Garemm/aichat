@@ -6,20 +6,23 @@ import Icon from '../components/ui/Icon';
 const TITLES = {
   '/dashboard':       'Dashboard',
   '/products':        'Productos',
+  '/orders':        'Pedidos',
   '/categories':      'Categorías',
   '/import':          'Importar',
   '/services':        'Servicios',
   '/promotions':      'Promociones',
   '/hours':           'Horarios',
   '/business':        'Mi Negocio',
+  '/subscriptions': 'Suscripciones',
   '/change-password': 'Cambiar Contraseña',
 };
 
 const Navbar = ({ onMenuClick }) => {
   const { pathname } = useLocation();
-  const { signOut }  = useAuth();
+  const { signOut, isActive }  = useAuth();
   const navigate     = useNavigate();
   const title = TITLES[pathname] ?? 'Admin';
+  const locked = !isActive;
 
   const handleLogout = async () => {
     await signOut();
@@ -27,7 +30,7 @@ const Navbar = ({ onMenuClick }) => {
   };
 
   return (
-    <header className="navbar">
+    <header className={`navbar${locked ? ' navbar--locked' : ''}`}>
       <div className="navbar__left">
         <motion.button
           className="navbar__hamburger"

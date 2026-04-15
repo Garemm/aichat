@@ -1,8 +1,8 @@
 // ── Business Controller ──────────────────────────────────────────────────────
-const BusinessModel  = require('../models/businessModel');
-const ProductModel   = require('../models/productModel');
-const ServiceModel   = require('../models/serviceModel');
-const PromotionModel = require('../models/promotionModel');
+import BusinessModel from '../models/businessModel.js';
+import ProductModel from '../models/productModel.js';
+import ServiceModel from '../models/serviceModel.js';
+import PromotionModel from '../models/promotionModel.js';
 
 const getStats = async (req, res, next) => {
   try {
@@ -32,4 +32,4 @@ const updateInfo = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-module.exports = { getStats, getInfo, updateInfo };
+export { getStats, getInfo, updateInfo };

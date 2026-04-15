@@ -172,6 +172,10 @@ export const getTopProducts = (businessId) =>
   request(`${BASE}/analytics/top-products/${businessId}`)
     .then((res) => res.data ?? res);
 
+export const getTrafficByHour = (businessId) =>
+  request(`${BASE}/analytics/traffic-by-hour/${businessId}`)
+    .then((res) => res.data ?? res);
+
 // ── Bulk Import ───────────────────────────────────────────────────────────────
 export const importPreview = (file) => {
   const form = new FormData();
@@ -191,4 +195,35 @@ export const importConfirm = (rows, createMissingCategories = false) =>
     method: 'POST',
     body: JSON.stringify({ rows, createMissingCategories }),
   });
+
+// ── Subscriptions ─────────────────────────────────────────────────────────────
+export const getSubscriptions     = ()                    => request(`${BASE}/subscriptions`);
+export const toggleSubscription   = (id, is_active)       => request(`${BASE}/subscriptions/${id}`, {
+  method: 'PUT',
+  body: JSON.stringify({ is_active }),
+});
+export const setSubscriptionPlan  = (id, subscription_id) => request(`${BASE}/subscriptions/${id}/plan`, {
+  method: 'PUT',
+  body: JSON.stringify({ subscription_id }),
+});
+
+// ── Business types (public — used by Register + BusinessForm) ─────────────────
+export const getBusinessTypes = () =>
+  publicRequest(`${BASE}/business-types`)
+    .then((res) => res.data ?? res);
+
+export const getLegalDocument = (type) =>
+  publicRequest(`${BASE}/legal/${type}`)
+    .then((res) => res.content ?? res?.data?.content ?? '');
+
+// ── Pedidos ───────────────────────────────────────────────────────────────────
+export const getTodaysOrders    = ()              => request(`${BASE}/orders/today`, { cache: 'no-store' });
+export const updateOrder        = (id, changes)   => request(`${BASE}/orders/${id}`, {
+  method: 'PUT',
+  body: JSON.stringify(changes),
+});
+export const setAceptaPedidos   = (value)   => request(`${BASE}/business/acepto-pedidos`, {
+  method: 'PUT',
+  body: JSON.stringify({ acepto_pedidos: value }),
+});
 

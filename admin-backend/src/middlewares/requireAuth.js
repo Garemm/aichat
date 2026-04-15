@@ -1,7 +1,7 @@
 // ── Auth middleware (JWT) ────────────────────────────────────────────────────────
 // Reads and verifies the short-lived JWT from the Authorization: Bearer header.
 // Sets req.adminId and req.businessId for downstream handlers.
-const { verifyAccess } = require('../config/jwt');
+import { verifyAccess } from '../config/jwt.js';
 
 const requireAuth = (req, res, next) => {
   const auth = req.headers['authorization'];
@@ -18,4 +18,4 @@ const requireAuth = (req, res, next) => {
   }
 };
 
-module.exports = requireAuth;
+export default requireAuth;

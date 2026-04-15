@@ -1,5 +1,5 @@
 // ── Service Model ────────────────────────────────────────────────────────────
-const db = require('../config/database');
+import db from '../config/database.js';
 
 const ServiceModel = {
   async findAllByBusiness(businessId) {
@@ -61,4 +61,4 @@ const ServiceModel = {
   },
 };
 
-module.exports = ServiceModel;
+export default ServiceModel;

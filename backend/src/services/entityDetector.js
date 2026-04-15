@@ -24,12 +24,31 @@
  *   - "algo con queso?"     → intent=productos, entity=attribute:"queso"
  */
 
-const nlp = require('compromise');
-const db  = require('../config/database');
-const { normalize, toSingular, wordVariants } = require('./normalize');
-const { extractAttribute, extractCompoundQuery, extractCategoryAttributeQuery, isMaterial } = require('./attributeExtractor');
+import nlp from 'compromise';
+import db from '../config/database.js';
+import { normalize, toSingular, wordVariants } from './normalize.js';
+import { extractAttribute, extractCompoundQuery, extractCategoryAttributeQuery, isMaterial } from './attributeExtractor.js';
 
 // ─── Stopwords ────────────────────────────────────────────────────────────────
+
+/**
+ * Single article/pronoun words that should NEVER be returned as a standalone
+ * entity candidate. They can appear inside multi-word entity names (e.g. "tacos
+ * de la casa") but alone they are meaningless and cause ILIKE '%una%' queries
+ * that match every product description containing the Spanish article "una".
+ *
+ * Also includes standalone demonstrative / object pronouns that appear in
+ * purchase-pronoun phrases ("quiero uno", "quiero ese", "lo quiero") where the
+ * real product lives in context, not in the current message.
+ */
+const BARE_ARTICLES = new Set([
+  // Definite / indefinite articles
+  'el', 'la', 'los', 'las', 'un', 'una', 'unos', 'unas', 'uno',
+  // Demonstrative pronouns — standalone never a product name
+  'ese', 'esa', 'esos', 'esas', 'eso', 'esto', 'esta', 'estos', 'estas',
+  // Object pronouns
+  'lo',
+]);
 
 const ENTITY_STOPWORDS = new Set([
   'el', 'la', 'los', 'las', 'un', 'una', 'unos', 'unas',
@@ -46,6 +65,12 @@ const ENTITY_STOPWORDS = new Set([
 /**
  * Generic / meta words that are NEVER valid entity names.
  * If the entire extracted entity is one of these → reject.
+ *
+ * NOTE: words in this set block only when they ARE the complete entity value.
+ * They do NOT block multi-word phrases that contain them as a sub-token
+ * (e.g. "menu especial empresarial" is a valid service name even though
+ * standalone "menu" is blocked). Per-token blocking is handled separately
+ * by ENTITY_TOKEN_BLOCKLIST below.
  */
 const ENTITY_BLOCKLIST = new Set([
   'producto', 'productos', 'articulo', 'articulos',
@@ -54,29 +79,58 @@ const ENTITY_BLOCKLIST = new Set([
   'servicio', 'servicios', 'oferta', 'ofertas',
   'algo', 'todo', 'nada', 'mucho', 'poco',
   'promocion', 'promociones', 'descuento', 'descuentos',
-  // Intent-domain words — these are intent names, not valid product entities.
-  // Without blocking them, "que horarios tienen?" would extract "horarios" as
-  // a false product entity and override the correct intent routing.
   'horario', 'horarios',
-  'precios',          // singular 'precio' already covered below
+  'precios',
   'ubicacion', 'ubicaciones',
-  // Verb forms — Compromise NLP can extract conjugated verb stems as nouns
-  // (e.g. "tienen" from "que promociones tienen"). Block all common forms.
   'tiene', 'tienen', 'tienes', 'tener',
   'hay', 'haber',
-  // Question words — never entity names
   'cuanto', 'cuanta', 'cuantos', 'cuantas',
   'cuando', 'donde', 'como', 'cual', 'cuales', 'quien',
   'que', 'precio', 'costo', 'tarifa',
-  // Command verbs — imperative forms that trigger actions but are never entities
   'muestrame', 'dame', 'pasame', 'mandame', 'enviame',
-  // Freestanding prepositions / affirmations that NLP misidentifies as nouns
+  'sobre', 'acerca', 'si',
+  'y',
+]);
+
+/**
+ * Words that poison a candidate even when they appear as a single TOKEN
+ * within a multi-word phrase. These are grammar glue, intent-domain keywords,
+ * verbs, and question words that can never be part of a valid product or
+ * service name.
+ *
+ * Words that CAN appear as a prefix in legitimate names (e.g. "menu especial
+ * empresarial", "servicio de renta", "catalogo de herramientas") must NOT be
+ * included here — they stay in ENTITY_BLOCKLIST as standalone-only guards.
+ */
+const ENTITY_TOKEN_BLOCKLIST = new Set([
+  // Generic commodity nouns — always meta-references, never actual item names
+  'producto', 'productos', 'articulo', 'articulos',
+  'item', 'items', 'cosa', 'cosas', 'mercancia',
+  'algo', 'todo', 'nada', 'mucho', 'poco',
+  // Conjunction indicating two items were captured together ("hamburguesa y soda")
+  'y',
+  // Intent-domain / meta words
+  'precio', 'precios', 'tarifa', 'costo',
+  'horario', 'horarios',
+  'ubicacion', 'ubicaciones',
+  'descuento', 'descuentos',
+  'promocion', 'promociones',
+  // Question words
+  'cuanto', 'cuanta', 'cuantos', 'cuantas',
+  'cuando', 'donde', 'como', 'cual', 'cuales', 'quien',
+  'que',
+  // Verb forms
+  'tiene', 'tienen', 'tienes', 'tener',
+  'hay', 'haber',
+  // Command verbs
+  'muestrame', 'dame', 'pasame', 'mandame', 'enviame',
+  // Particles
   'sobre', 'acerca', 'si',
 ]);
 
 function isBlocklisted(entity) {
   if (ENTITY_BLOCKLIST.has(entity)) return true;
-  return entity.split(/\s+/).some((w) => ENTITY_BLOCKLIST.has(w));
+  return entity.split(/\s+/).some((w) => ENTITY_TOKEN_BLOCKLIST.has(w));
 }
 
 function stripLeadingStopwords(entity) {
@@ -117,8 +171,13 @@ const PRODUCT_QUERY_PATTERNS = [
   /tienen\s+disponible\s+(?<entity>[\wñ\s]+?)(?:\?|$)/,
   /hay\s+disponibilidad\s+de\s+(?<entity>[\wñ\s]+?)(?:\?|$)/,
   /cu[ae]nto\s+(?:cuesta|vale|sale|cobran\s+por)\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
-  // "que precio tiene la hamburguesa" / "cual es el precio de la pizza"
+  // "en cuanto tiene/tienes/tienen [las] tortas de carnitas" / "a cuanto tiene X"
+  // Mexican price query — placed before generic tiene[sn]? so it takes priority when "en/a cuanto" is present.
+  /\b(?:en|a)\s+cuanto\s+tiene[sn]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
+  // "que precio tiene la hamburguesa" / "cual es el precio de la pizza" / "cual es el precio del arroz"
+  // The second form handles "del" (contracted de+el) directly after "precio".
   /(?:que\s+|cual\s+es\s+(?:el\s+)?)?precio\s+(?:tiene[n]?|cuesta|cobran|vale|sale)\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
+  /(?:cual\s+es\s+(?:el\s+)?)?precio\s+(?:del?\s+(?:el\s+|la\s+|los\s+|las\s+)?|de\s+(?:la\s+|los\s+|las\s+|un\s+|una\s+))(?<entity>[\wñ\s]+?)(?:\?|$)/,
   // "precio hamburguesa" / "precio agua de horchata" (bare price query, starts with "precio")
   /^precio\s+(?:de\s+)?(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
   /precio\s+de\s+(?:el\s+|la\s+|los\s+|un\s+|una\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
@@ -136,20 +195,42 @@ const PRODUCT_QUERY_PATTERNS = [
   /esta(?:s|n)?\s+disponible[s]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
   /hay\s+stock\s+de\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
   /tiene(?:s|n)?\s+disponibilidad\s+(?:de\s+)?(?:el\s+|la\s+|los\s+|las\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
+  // "recomiéndame una hamburguesa picante" / "sugíreme unos tacos al pastor"
+  // Extracts the product noun phrase that follows a recommendation/suggestion verb.
+  // Placed before generic patterns so the specific verb takes priority.
+  /\b(?:recomiend[ao](?:me|nos)?|sugier[eo](?:me|nos)?)\s+(?:un[ao]s?\s+)?(?<entity>[\wñ]+(?:\s+[\wñ]+){0,3}?)(?:\s*\?|\s*$)/,
   // "que tipo(s) de X tienen/tienes/tiene/hay/vende/venden" — entity inside "que tipo de … verb"
   // MUST appear before the generic "que X tienen" pattern below.
   /^que\s+tipos?\s+de\s+(?<entity>[\wñ]+(?:\s+[\wñ]+){0,3})\s+(?:tiene[sn]?|tienen|hay|vende[sn]?|venden|ofrece[n]?|maneja[n]?)\s*\??$/,
   /que\s+tipos?\s+de\s+(?<entity>[\wñ]+(?:\s+[\wñ]+){0,3})\s+(?:tiene[sn]?|tienen|hay|vende[sn]?|venden|ofrece[n]?|maneja[n]?)/,
-  // "que [entity] tienen/tienes/hay?" — entity BETWEEN "que" and trailing verb.
+  // Fronted-PP interrogative: "de X que tienes/tienen/hay?" — PP precedes the verb.
+  // e.g. "de postres que tienes" → entity=postres
+  //      "de hamburguesas que tienen" → entity=hamburguesas
+  // Must run BEFORE the generic tiene[sn]? pattern.
+  /^de\s+(?<entity>[\wñ]+(?:\s+[\wñ]+){0,3})\s+que\s+(?:tienes?|tienen|hay|vende[sn]?|ofrecen?)\s*\??$/,
+  // "que [entity] tienen/tienes/hay/vende/venden/ofrece/maneja?" — entity BETWEEN "que" and trailing verb.
   // Must run BEFORE the generic tiene[sn]? pattern which would otherwise grab
   // whatever follows "tienen" (e.g. "disponibles") as the entity.
   // Distinct from description patterns where verb follows IMMEDIATELY after "que".
-  /^que\s+(?<entity>[\wñ]+(?:\s+[\wñ]+){0,4})\s+(?:tiene[sn]?|tienen|hay)\s*(?:[\wñ]+\s*)?\??$/,
+  /^que\s+(?<entity>[\wñ]+(?:\s+[\wñ]+){0,4})\s+(?:tiene[sn]?|tienen|hay|vende[sn]?|venden|ofrece[n]?|maneja[n]?)\s*(?:[\wñ]+\s*)?\??$/,
+  // Bare "que <noun>" — verbless clause from a multi-intent split where the user
+  // omitted the verb (e.g. right side of "vende y tambien que refrescos" → "que refrescos").
+  // Matches ONLY when the ENTIRE segment is "que <1-4 word noun phrase>" with no verb.
+  // Negative lookahead prevents matching when the noun IS a known verb/query word
+  // (e.g. "que venden" must not extract "venden" as an entity here).
+  // Must appear AFTER all "que X verb" patterns; this is the final fallback.
+  /^que\s+(?!(?:vende[nsn]?|tienes?|tienen|hay|ofrece[n]?|maneja[n]?|contiene[n]?|incluye[n]?|es\b|son\b|tipo[s]?\b|precio[s]?\b|horario[s]?\b|servicio[s]?\b|promo(?:cion(?:es)?)?\b)(?:\s|$))(?<entity>[\wñ]+)\s*\??$/,
   /tiene[sn]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
   /hay\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
   /existe[n]?\s+(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
   /busco\s+(?:un\s+|una\s+|el\s+|la\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
   /quiero\s+(?:un\s+|una\s+|el\s+|la\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
+  // Purchase imperatives: "dame una hamburguesa doble", "dame un taco al pastor"
+  // "dame el catálogo/menú de X" is intercepted by the catalog pattern above.
+  // This pattern captures direct product requests: "dame (un/una) <product>".
+  /\bdame\s+(?:un[ao]\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
+  // Past-tense order: "pedí una pizza hawaiana" — common in Mexican informal speech
+  /\bped[ií]\s+(?:un[ao]\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
   /me\s+interesa\s+(?:el\s+|la\s+|los\s+|las\s+)?(?<entity>[\wñ\s]+?)(?:\?|$)/,
 
   // "informacion sobre/de/acerca de X" — descriptions requested via preposition
@@ -220,7 +301,7 @@ function extractEntityCandidate(normalizedText) {
       const raw = match.groups.entity.trim();
       const stripped = stripLeadingStopwords(raw);
       const cleaned = cleanEntityCandidate(stripped);
-      if (cleaned.length >= 2 && !isBlocklisted(cleaned)) {
+      if (cleaned.length >= 2 && !isBlocklisted(cleaned) && !BARE_ARTICLES.has(cleaned)) {
         return cleaned;
       }
     }
@@ -238,7 +319,7 @@ function extractEntityCandidate(normalizedText) {
         const stripped = stripLeadingStopwords(normalize(n));
         return cleanEntityCandidate(stripped);
       })
-      .filter((n) => n.length >= 2 && !isBlocklisted(n))
+      .filter((n) => n.length >= 2 && !isBlocklisted(n) && !BARE_ARTICLES.has(n))
       .sort((a, b) => b.length - a.length)[0];
     if (best) return best;
   }
@@ -292,22 +373,25 @@ async function queryProducts(entity, businessId) {
   }
 
   // Multi-word fallback: "cuaderno sin lineas" won't match "cuaderno de dibujo sin lineas"
-  // as a substring, so we also require each word to appear ANYWHERE in the text fields.
-  // This is added as an extra OR condition (AND across words, OR across fields per word).
+  // as a substring, so we also require each word to appear in the PRODUCT NAME.
+  //
+  // IMPORTANT: We search p.name ONLY (not description/attributes) here because
+  // combining individual words OR'd across description+attrs produces false positives:
+  //   "agua natural" → "agua" in description + "natural" in description of an unrelated
+  //   product ("Hamburguesa Vegetariana — ingredientes naturales en agua purificada")
+  //   would match, returning completely wrong results.
+  // The full-phrase ILIKE in the first loop already covers description/attr matches for the
+  // exact phrase. This fallback only adds value for product NAMES that contain all the words
+  // but not as a consecutive substring.
   for (const v of variants) {
     const words = v.split(' ').filter((w) => w.length >= 2);
     if (words.length < 2) continue; // single-word already covered above
     const wordClauses = [];
     for (const w of words) {
       const like = `%${sqlParam(w)}%`;
-      wordClauses.push(
-        `(${trCol('p.name')} ILIKE $${idx}` +
-        ` OR ${trCol('p.description')} ILIKE $${idx + 1}` +
-        ` OR EXISTS (SELECT 1 FROM product_attributes pa2 WHERE pa2.product_id = p.id` +
-        ` AND (${trCol('pa2.value')} ILIKE $${idx + 2} OR ${trCol('pa2.key')} ILIKE $${idx + 3})))`
-      );
-      params.push(like, like, like, like);
-      idx += 4;
+      wordClauses.push(`${trCol('p.name')} ILIKE $${idx}`);
+      params.push(like);
+      idx += 1;
     }
     conditions.push(`(${wordClauses.join(' AND ')})`);
   }
@@ -384,6 +468,35 @@ async function queryPromotions(entity, businessId) {
   return result.rows;
 }
 
+/**
+ * Searches business_services by ILIKE on name and description.
+ * Also tries each word of a multi-word candidate so "servicio a domicilio"
+ * matches a service simply named "Domicilio" or "Entrega a domicilio".
+ *
+ * @param {string} entity
+ * @param {number} businessId
+ * @returns {Promise<Array>}
+ */
+async function queryServices(entity, businessId) {
+  // Build a list of variants: full phrase + individual meaningful words (len > 2)
+  const words = entity.split(/\s+/).filter((w) => w.length > 2);
+  const variants = [...new Set([entity, ...words])];
+
+  for (const v of variants) {
+    const result = await db.query(
+      `SELECT id, name, description, price
+       FROM business_services
+       WHERE business_id = $1
+         AND (name ILIKE $2 OR description ILIKE $2)
+       ORDER BY name ASC
+       LIMIT 5`,
+      [businessId, `%${v}%`]
+    );
+    if (result.rows.length > 0) return result.rows;
+  }
+  return [];
+}
+
 // ─── Entity type classification ───────────────────────────────────────────────
 
 /**
@@ -435,16 +548,37 @@ async function detectEntities(message, businessId, intentResult = { intent: null
   }
 
   // Guard: skip compound detection when the message starts with an
-  // existence-question verb (tiene / tienes / tienen).  In those messages the
-  // full phrase after the verb is the PRODUCT NAME, not a compound type+attr
+  // existence-question verb (tiene / tienes / tienen / hay).  In those messages
+  // the full phrase after the verb is the PRODUCT NAME, not a compound type+attr
   // query.  e.g. "tienen agua de limon" → entity="agua de limon" (product),
   // NOT compound entity="agua" + attribute="limon".
+  // Similarly "tienes hamburguesa con queso?" → entity="hamburguesa con queso"
+  // (product search), not compound entity="hamburguesa" + attribute="queso".
   // Note: "tiene algo con carne de res" is NOT guarded (extractAttribute fires
   // first) and its embedded compound is promoted via the inner-compound check.
-  const skipCompound = /^tiene[sn]?\s/.test(normalizedText);
+  const skipCompound = /^(?:tiene[sn]?|hay)\s/.test(normalizedText);
   const compoundExtracted = skipCompound ? null : extractCompoundQuery(normalizedText);
   if (compoundExtracted) {
     const attrType = isMaterial(compoundExtracted.attribute) ? 'material' : 'feature';
+    // Check if the entity part resolves to a category → use category+attribute path
+    // so the pipeline searches within that category for products with the attribute,
+    // instead of doing a raw compound product search.
+    // e.g. "bebida de chocolate" → entity="bebida" is a category → categoryTerm set
+    try {
+      const catRows = await queryCategories(compoundExtracted.entity, businessId);
+      if (catRows.length > 0) {
+        return {
+          ...empty,
+          type: 'attribute',
+          value: compoundExtracted.fullPhrase,
+          categoryTerm: compoundExtracted.entity,
+          attributeTerm: compoundExtracted.attribute,
+          attributeType: attrType,
+        };
+      }
+    } catch (err) {
+      console.error('[EntityDetector] Error querying categories for compound entity:', err.message);
+    }
     return {
       ...empty,
       type: 'attribute',
@@ -496,7 +630,7 @@ async function detectEntities(message, businessId, intentResult = { intent: null
       try {
         const categoryRows = await queryCategories(tipoCand, businessId);
         if (categoryRows.length > 0) {
-          return { ...empty, category: tipoCand, type: 'category', value: tipoCand };
+          return { ...empty, category: tipoCand, type: 'category', value: tipoCand, _categoryRows: categoryRows };
         }
       } catch (err) {
         console.error('[EntityDetector] Error querying categories for tipo-de:', err.message);
@@ -526,7 +660,7 @@ async function detectEntities(message, businessId, intentResult = { intent: null
       try {
         const categoryRows = await queryCategories(queCand, businessId);
         if (categoryRows.length > 0) {
-          return { ...empty, category: queCand, type: 'category', value: queCand };
+          return { ...empty, category: queCand, type: 'category', value: queCand, _categoryRows: categoryRows };
         }
       } catch (err) {
         console.error('[EntityDetector] Error querying categories for que-entity-tienen:', err.message);
@@ -553,7 +687,7 @@ async function detectEntities(message, businessId, intentResult = { intent: null
       try {
         const categoryRows = await queryCategories(bareCand, businessId);
         if (categoryRows.length > 0) {
-          return { ...empty, category: bareCand, type: 'category', value: bareCand };
+          return { ...empty, category: bareCand, type: 'category', value: bareCand, _categoryRows: categoryRows };
         }
       } catch (err) {
         console.error('[EntityDetector] Error querying categories for bare noun:', err.message);
@@ -572,6 +706,64 @@ async function detectEntities(message, businessId, intentResult = { intent: null
   const candidate = extractEntityCandidate(normalizedText);
 
   if (!candidate) return empty;
+
+  // ── "entity CON attribute" candidate resolution ───────────────────────────
+  // When the regex extracted a phrase containing "con" (e.g. "bebida con chocolate"),
+  // check whether the part BEFORE "con" is a category (or its singular/plural form).
+  // If it resolves to a category, return an attribute result so the pipeline
+  // searches products in that category that have the given attribute — giving
+  // "bebidas con chocolate" rather than a raw product full-text search.
+  // Falls through to normal product/category search only when no category matches.
+  if (candidate.includes(' con ')) {
+    const conIdx = candidate.indexOf(' con ');
+    const entityPart = candidate.slice(0, conIdx).trim();
+    const attrPart   = candidate.slice(conIdx + 5).trim();
+    if (entityPart.length >= 2 && attrPart.length >= 2) {
+      try {
+        const catRows = await queryCategories(entityPart, businessId);
+        if (catRows.length > 0) {
+          return {
+            ...empty,
+            type: 'attribute',
+            value: `${entityPart} con ${attrPart}`,
+            categoryTerm: entityPart,
+            attributeTerm: attrPart,
+            attributeType: 'feature',
+          };
+        }
+      } catch (err) {
+        console.error('[EntityDetector] Error querying categories for entity-con-attr:', err.message);
+      }
+      // Category not found — try exact product match with full "entity con attr" before
+      // falling back to the broad product search below.
+      try {
+        const exactRows = await queryProducts(candidate, businessId);
+        if (exactRows.length > 0) {
+          return { ...empty, product: candidate, type: 'product', value: candidate, _rows: exactRows };
+        }
+      } catch (err) {
+        console.error('[EntityDetector] Error querying products for entity-con-attr:', err.message);
+      }
+      // If neither category nor exact product found, try the entity part alone as a product
+      try {
+        const entityRows = await queryProducts(entityPart, businessId);
+        if (entityRows.length > 0) {
+          // Return attribute so the pipeline filters by both entity + attribute
+          return {
+            ...empty,
+            type: 'attribute',
+            value: `${entityPart} con ${attrPart}`,
+            categoryTerm: null,
+            entityTerm: entityPart,
+            attributeTerm: attrPart,
+            attributeType: 'feature',
+          };
+        }
+      } catch (err) {
+        console.error('[EntityDetector] Error querying products for entity part:', err.message);
+      }
+    }
+  }
 
   // Try product first (most common case)
   try {
@@ -601,6 +793,18 @@ async function detectEntities(message, businessId, intentResult = { intent: null
     }
   } catch (err) {
     console.error('[EntityDetector] Error querying promotions:', err.message);
+  }
+
+  // Try service — checked last so product/category/promotion take priority.
+  // Handles queries like "tiene servicio a domicilio?" where the candidate is
+  // not a product but resolves to a business service.
+  try {
+    const serviceRows = await queryServices(candidate, businessId);
+    if (serviceRows.length > 0) {
+      return { ...empty, type: 'service', value: candidate, _serviceRows: serviceRows };
+    }
+  } catch (err) {
+    console.error('[EntityDetector] Error querying services:', err.message);
   }
 
   // Candidate found in text but no DB match — still return candidate as product attempt
@@ -677,13 +881,40 @@ function formatCategoryResponse(categoryName, rows) {
   return `En ${categoryName} tenemos ${listed}. ¿Quieres más información de alguno?`;
 }
 
-module.exports = {
+/**
+ * Formats results when the exact search phrase had no match but individual
+ * keywords did (partial / related match).
+ * @param {string} originalEntity  The full user search phrase (e.g. "escuadra metalica")
+ * @param {Array}  products        Related products found via word fallback
+ * @returns {string}
+ */
+function formatPartialMatchResponse(originalEntity, products) {
+  if (!products || products.length === 0) {
+    return `Lo siento, no encontré ningún producto relacionado con "${originalEntity}". ¿Quieres ver el catálogo completo?`;
+  }
+  if (products.length === 1) {
+    const p = products[0];
+    const priceTag = p.is_available !== false
+      ? ` a $${Number(p.price).toFixed(2)}`
+      : ` (no disponible)`;
+    return `Encontré un producto relacionado con lo que buscas: ${p.name}${priceTag}. ¿Es lo que necesitas? 😊`;
+  }
+  const available = products.filter((p) => p.is_available !== false);
+  const pool   = available.length > 0 ? available : products;
+  const sample = pool.slice(0, VOICE_LIST_LIMIT);
+  const names  = sample.map((p) => `${p.name} a $${Number(p.price).toFixed(2)}`);
+  return `Encontré productos relacionados con lo que buscas: ${_enumList(names)}. ¿Alguno te interesa?`;
+}
+
+export {
   detectEntities,
   extractEntityCandidate,
   queryProducts,
   queryCategories,
   queryPromotions,
+  queryServices,
   formatProductResponse,
+  formatPartialMatchResponse,
   formatCategoryResponse,
   // Exported for testing
   isBlocklisted,

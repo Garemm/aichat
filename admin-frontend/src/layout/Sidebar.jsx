@@ -1,17 +1,9 @@
 import { NavLink } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import Icon from '../components/ui/Icon';
-
-const links = [
-  { to: '/dashboard',   label: 'Dashboard',           icon: 'dashboard'  },
-  { to: '/products',    label: 'Productos',            icon: 'products'   },
-  { to: '/categories',  label: 'Categorías',           icon: 'categories' },
-  { to: '/import',      label: 'Importar Productos',   icon: 'upload'     },
-  { to: '/services',    label: 'Servicios',            icon: 'services'   },
-  { to: '/promotions',  label: 'Promociones',          icon: 'promotions' },
-  { to: '/hours',       label: 'Horarios',             icon: 'hours'      },
-  { to: '/business',    label: 'Mi Negocio',           icon: 'business'   },
-];
+import { useAuth } from '../context/AuthContext';
+import logo from '../images/hayChat.png';
+import ALL_LINKS from '../routes/navLinks';
 
 const bottomLinks = [
   { to: '/change-password', label: 'Cambiar contraseña', icon: 'lock' },
@@ -30,17 +22,19 @@ const navItemVariants = {
   visible: { opacity: 1, x: 0, transition: { duration: 0.3, ease: [0.25, 0.46, 0.45, 0.94] } },
 };
 
-const SidebarLink = ({ to, label, icon, onClick }) => (
+const SidebarLink = ({ to, label, icon, onClick, locked }) => (
   <NavLink
     to={to}
     onClick={onClick}
     className={({ isActive }) => `sidebar__link${isActive ? ' sidebar__link--active' : ''}`}
+    tabIndex={locked ? -1 : undefined}
+    aria-disabled={locked || undefined}
   >
     {({ isActive }) => (
       <motion.span
         className="sidebar__link-inner"
-        whileHover={{ x: 3, scale: 1.01 }}
-        whileTap={{ scale: 0.97 }}
+        whileHover={locked ? {} : { x: 3, scale: 1.01 }}
+        whileTap={locked ? {} : { scale: 0.97 }}
         transition={{ type: 'spring', stiffness: 400, damping: 28 }}
       >
         <motion.span
@@ -52,8 +46,15 @@ const SidebarLink = ({ to, label, icon, onClick }) => (
         </motion.span>
         <span>{label}</span>
 
+        {/* Lock badge when subscription is inactive */}
+        {locked && (
+          <span className="sidebar__link-lock">
+            <Icon name="lock" size={11} />
+          </span>
+        )}
+
         {/* Active glow pill */}
-        {isActive && (
+        {isActive && !locked && (
           <motion.span
             className="sidebar__active-pill"
             layoutId="sidebar-active-pill"
@@ -66,34 +67,53 @@ const SidebarLink = ({ to, label, icon, onClick }) => (
 );
 
 const Sidebar = ({ onClose }) => {
+  const { permissions, isActive } = useAuth();
+  const locked = !isActive;
   const handleNav = () => {
     if (window.innerWidth < 900) onClose?.();
   };
 
+  // Only show links whose permission key is TRUE in permissions_types.
+  // Falls back to empty list when permissions object is empty (no plan assigned).
+  const visibleLinks = ALL_LINKS.filter((l) => permissions[l.permKey] === true);
+
   return (
-    <aside className="sidebar">
-      {/* Brand */}
+    <aside className={`sidebar${locked ? ' sidebar--locked' : ''}`}>
+      {/* Brand / Logo */}
       <motion.div
         className="sidebar__brand"
-        initial={{ opacity: 0, y: -10 }}
+        initial={{ opacity: 0, y: -16 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4, ease: 'easeOut' }}
+        transition={{ duration: 0.5, ease: 'easeOut' }}
       >
+        {/* Animated accent line at top */}
         <motion.span
-          className="sidebar__brand-dot"
-          animate={{ boxShadow: ['0 0 8px rgba(99,102,241,0.6)', '0 0 18px rgba(99,102,241,0.9)', '0 0 8px rgba(99,102,241,0.6)'] }}
-          transition={{ duration: 2.5, repeat: Infinity, ease: 'easeInOut' }}
+          className="sidebar__brand-line"
+          initial={{ scaleX: 0 }}
+          animate={{ scaleX: 1 }}
+          transition={{ duration: 0.6, ease: 'easeOut', delay: 0.2 }}
         />
-        Admin Panel
+
+        {/* Logo card */}
+        <div className="sidebar__logo-wrap">
+          <motion.div
+            className="sidebar__logo-glow"
+            animate={{ opacity: [0.5, 1, 0.5] }}
+            transition={{ duration: 4, repeat: Infinity, ease: 'easeInOut' }}
+          />
+          <img src={logo} alt="hayChat Business" className="sidebar__logo-img" />
+        </div>
+
+        {/* Close button — mobile only */}
         <motion.button
           className="sidebar__close"
           onClick={onClose}
           aria-label="Cerrar menú"
-          whileHover={{ rotate: 90, scale: 1.1 }}
+          whileHover={{ rotate: 90, scale: 1.15 }}
           whileTap={{ scale: 0.85 }}
           transition={{ type: 'spring', stiffness: 400, damping: 20 }}
         >
-          <Icon name="x" size={18} />
+          <Icon name="x" size={16} />
         </motion.button>
       </motion.div>
 
@@ -104,9 +124,9 @@ const Sidebar = ({ onClose }) => {
         initial="hidden"
         animate="visible"
       >
-        {links.map(({ to, label, icon }) => (
+        {visibleLinks.map(({ to, label, icon }) => (
           <motion.div key={to} variants={navItemVariants}>
-            <SidebarLink to={to} label={label} icon={icon} onClick={handleNav} />
+            <SidebarLink to={to} label={label} icon={icon} onClick={handleNav} locked={locked} />
           </motion.div>
         ))}
       </motion.nav>
@@ -120,7 +140,7 @@ const Sidebar = ({ onClose }) => {
       >
         <div className="sidebar__divider" />
         {bottomLinks.map(({ to, label, icon }) => (
-          <SidebarLink key={to} to={to} label={label} icon={icon} onClick={handleNav} />
+          <SidebarLink key={to} to={to} label={label} icon={icon} onClick={handleNav} locked={locked} />
         ))}
       </motion.div>
     </aside>

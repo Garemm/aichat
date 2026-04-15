@@ -1,10 +1,9 @@
 // ── Register Controller ───────────────────────────────────────────────────────
-const bcrypt          = require('bcrypt');
-const BusinessModel   = require('../models/businessModel');
-const AdminModel      = require('../models/adminModel');
+import bcrypt from 'bcrypt';
+import BusinessModel from '../models/businessModel.js';
+import AdminModel from '../models/adminModel.js';
 
 const SALT_ROUNDS = 12;
-const VALID_CATEGORIES = new Set(['restaurant', 'hardware', 'stationery']);
 
 const register = async (req, res, next) => {
   try {
@@ -26,11 +25,12 @@ const register = async (req, res, next) => {
       });
     }
 
-    // ── Validate category ─────────────────────────────────────────────────────
-    if (!VALID_CATEGORIES.has(category)) {
+    // ── Validate category (must be a positive integer FK to business_types) ────────
+    const categoryId = parseInt(category, 10);
+    if (!categoryId || categoryId < 1) {
       return res.status(400).json({
         success: false,
-        message: 'Categoría inválida. Opciones: restaurant, hardware, stationery',
+        message: 'Categoría inválida',
       });
     }
 
@@ -61,7 +61,7 @@ const register = async (req, res, next) => {
     // ── Create business ───────────────────────────────────────────────────────
     const business = await BusinessModel.create({
       name:         name.trim(),
-      category,
+      category:     categoryId,
       description:  description?.trim() || null,
       city:         city.trim(),
       email:        email.trim().toLowerCase(),
@@ -86,4 +86,4 @@ const register = async (req, res, next) => {
   }
 };
 
-module.exports = { register };
+export { register };

@@ -9,7 +9,7 @@
  * ADD NEW INTENTS: add a new method here and register it in businessInfoService.js.
  */
 
-const db = require('../config/database');
+import db from '../config/database.js';
 
 const BusinessModel = {
   /**
@@ -22,6 +22,22 @@ const BusinessModel = {
       [businessId]
     );
     return result.rows[0]?.name || null;
+  },
+
+  /**
+   * Returns the full business profile used to build AI (Ollama) system prompts.
+   * Includes name, category (giro), description, city, email, phone, webpage_link.
+   * @param {number} businessId
+   * @returns {Promise<{id, name, category, description, city, email, phone, webpage_link}|null>}
+   */
+  async getProfile(businessId) {
+    const result = await db.query(
+      `SELECT id, name, category, description, city, email, phone, webpage_link
+       FROM businesses
+       WHERE id = $1`,
+      [businessId]
+    );
+    return result.rows[0] ?? null;
   },
 
   /**
@@ -174,7 +190,7 @@ const BusinessModel = {
          AND p.is_available = TRUE
        ORDER BY p.name ASC
        LIMIT $3 OFFSET $4`,
-      [businessId, categoryName, limit, offset]
+      [businessId, `%${categoryName}%`, limit, offset]
     );
     return result.rows;
   },
@@ -192,7 +208,7 @@ const BusinessModel = {
        WHERE p.business_id = $1
          AND c.name ILIKE $2
          AND p.is_available = TRUE`,
-      [businessId, categoryName]
+      [businessId, `%${categoryName}%`]
     );
     return parseInt(result.rows[0]?.total ?? '0', 10);
   },
@@ -229,7 +245,8 @@ const BusinessModel = {
          city,
          webpage_link,
          phone,
-         email
+         email,
+         acepto_pedidos
        FROM businesses
        WHERE id = $1`,
       [businessId]
@@ -317,17 +334,48 @@ const BusinessModel = {
   },
 
   /**
-   * Returns all registered businesses (id, name, type, city).
+   * Returns all registered businesses (id, chat_uuid, name, type, city).
    * Used by the frontend BusinessSelector to populate the selection screen.
    */
   async getAllBusinesses() {
     const result = await db.query(
-      `SELECT id, name, category, city
+      `SELECT id, chat_uuid, name, category, city
        FROM businesses
        ORDER BY id ASC`
     );
     return result.rows;
   },
+
+  /**
+   * Looks up a business by its public chat_uuid.
+   * @param {string} chatUuid
+   * @returns {Promise<{id, name, city}|null>}
+   */
+  async getByUuid(chatUuid) {
+    const result = await db.query(
+      `SELECT id, name, city, acepto_pedidos
+       FROM businesses
+       WHERE chat_uuid = $1`,
+      [chatUuid]
+    );
+    return result.rows[0] ?? null;
+  },
+
+  /**
+   * Returns the subscription plan ID for a business.
+   *   1 = Lite    → no AI, placeholder response
+   *   2 = Premium → full AI via llama3 (Ollama)
+   * Returns null when the business row is not found.
+   * @param {number} businessId
+   * @returns {Promise<number|null>}
+   */
+  async getSubscriptionId(businessId) {
+    const result = await db.query(
+      'SELECT subscription_id FROM businesses WHERE id = $1',
+      [businessId]
+    );
+    return result.rows[0]?.subscription_id ?? null;
+  },
 };
 
-module.exports = BusinessModel;
+export default BusinessModel;

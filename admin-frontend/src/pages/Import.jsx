@@ -1,4 +1,4 @@
-﻿import { useState, useRef, useCallback } from 'react';
+﻿import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { importPreview, importConfirm, getCategories } from '../services/api';
 import { useToast } from '../context/ToastContext';
@@ -136,10 +136,27 @@ const Import = () => {
   };
   const handleFileInput = (e) => processFile(e.target.files[0]);
 
+  // ── Keep missingCategories banner in sync after row edits ────────────────
+  useEffect(() => {
+    if (rows.length === 0) return;
+    const mc = [...new Set(
+      rows.filter((r) => r.missingCategory && !r.category_id).map((r) => r.missingCategory)
+    )];
+    setMissingCategories(mc);
+  }, [rows]);
+
   // ── Row editing ────────────────────────────────────────────────────────────
   const updateRow = (index, field, value) => {
     setRows((prev) => {
-      const next = prev.map((r, i) => i === index ? { ...r, [field]: value } : r);
+      const next = prev.map((r, i) => {
+        if (i !== index) return r;
+        const updated = { ...r, [field]: value };
+        // When user picks an existing category, clear the stale missing-category flag
+        if (field === 'category_id') {
+          updated.missingCategory = value ? null : r.missingCategory;
+        }
+        return updated;
+      });
       const r = next[index];
       const errors   = [];
       const warnings = (r._warnings || []).filter((w) => !w.includes('no existe') && !w.includes('inválido'));

@@ -1,5 +1,3 @@
-'use strict';
-
 /**
  * src/services/aiDecisionEngine.js
  *
@@ -18,7 +16,7 @@
  * The pipeline consults this AFTER the deterministic layers fail.
  */
 
-const { normalize } = require('./normalize');
+import { normalize } from './normalize.js';
 
 /** Word count threshold for "long" messages. */
 const LONG_MESSAGE_WORDS = 12;
@@ -50,18 +48,19 @@ const MULTI_INTENT_SCORE_GAP = 1;
  * @returns {AIDecision}
  */
 function shouldUseAI(normalizedText, intentResult, entityResult, context) {
-  // ── Guard: if backend already resolved, never use AI ──────────────────────
-  if (intentResult.intent && intentResult.score >= 3) {
-    return { routing: 'backend', reason: 'high-confidence intent detected', aiCategory: null };
-  }
+  // ── Check for explicit AI patterns FIRST — before ALL guards ─────────────
+  // RECOMMEND_RE, COMPARE_RE and SUPERLATIVE_RE take absolute priority because
+  // 'dame' / 'quiero una' score 3 on the comprar intent yet the message can
+  // still be a recommendation or comparison ("dame una recomendacion",
+  // "quiero una que sea la mas barata"). Moving only these three patterns
+  // before the intent-score guard ensures they are never blocked.
+  // CAPACITY_RE and PRODUCT_DESC_RE stay after the guard because they
+  // match verb forms that descripcion intent also scores ≥ 3 on ("que tiene",
+  // "que contiene") — moving them would route deterministic descripcion
+  // queries to AI unnecessarily.
 
-  // ── Check for explicit AI patterns FIRST — before entity/context guards ──
-  // Recommendation/comparison requests must bypass entity detection because
-  // "que me recomienda de postres?" detects "postres" as entity but the
-  // question itself requires AI reasoning, not a catalog dump.
-
-  // Recommendation requests
-  const RECOMMEND_RE = /\b(?:recomiend[ao](?:s|me|n)?|recomendacion|sugier[eo]|sugerencia|que\s+me\s+recomienda[sn]?|que\s+(?:es|esta)\s+bueno|mejor\s+opcion|popular|favorito)\b/;
+  // Recommendation requests (includes infinitive "recomendar" and modal "puedes/puede recomendar")
+  const RECOMMEND_RE = /\b(?:recomendar|recomiend[ao](?:s|me|n)?|recomendacion|sugier[eo]|sugerencia|que\s+me\s+recomienda[sn]?|que\s+(?:es|esta)\s+bueno|mejor\s+opcion|popular|favorito|(?:puedes?|puede|pueden|podr[ií]as?)\s+recomendar)\b/;
   if (RECOMMEND_RE.test(normalizedText)) {
     return { routing: 'ai', reason: 'recommendation request', aiCategory: 'recommendation' };
   }
@@ -79,10 +78,34 @@ function shouldUseAI(normalizedText, intentResult, entityResult, context) {
     return { routing: 'ai', reason: 'superlative comparison question', aiCategory: 'comparison' };
   }
 
+  // ── Guard: if backend already resolved, never use AI ──────────────────────
+  // Placed AFTER the three AI-override patterns above so that a high-confidence
+  // comprar intent (score=3 via 'dame') never blocks a recommendation or
+  // comparison signal.
+  if (intentResult.intent && intentResult.score >= 3) {
+    return { routing: 'backend', reason: 'high-confidence intent detected', aiCategory: null };
+  }
+
   // Capacity / nutritional questions: "cuántos tacos puedo comer", "cuánto debo consumir"
   const CAPACITY_RE = /\bcu[aá]nto[as]?\b.{0,50}\b(?:puedo|debo|debería?|conviene|se\s+puede|se\s+recomienda)\b/;
   if (CAPACITY_RE.test(normalizedText)) {
     return { routing: 'ai', reason: 'nutritional/capacity question', aiCategory: 'open_query' };
+  }
+
+  // Ingredient/content descriptive questions: "la quesadilla tiene queso?", "lleva carne?", "contiene gluten?"
+  // These are yes/no descriptive questions about a product, not catalog searches.
+  //
+  // Guard: if the availability verb is at the START or END of the message, it is an
+  // availability/catalog query — NOT an ingredient question — skip AI routing.
+  //   START: "tienes hamburguesas?"       → availability
+  //   END:   "que tipos de hamburguesa tiene?" → catalog  (verb trails after entity)
+  //   END:   "que hamburguesas tienen?"   → catalog
+  // In contrast, "la quesadilla tiene queso?" has "tiene" in the MIDDLE (not at start/end),
+  // so it is correctly treated as an ingredient description and routed to AI.
+  const PRODUCT_DESC_RE = /\b(?:tiene[ns]?|lleva[ns]?|contiene[ns]?|incluye[ns]?|trae[ns]?|viene[ns]?\s+con|es\s+con|viene\s+con)\b/;
+  const AVAIL_VERB_RE   = /^(?:tienes?|tienen|hay)\s+|(?:tiene[sn]?|tienen|hay)\s*\??$|\bsi\s+(?:tienes?|tienen|hay)\b/;
+  if (!AVAIL_VERB_RE.test(normalizedText) && PRODUCT_DESC_RE.test(normalizedText)) {
+    return { routing: 'ai', reason: 'product description/ingredient question', aiCategory: 'open_query' };
   }
 
   // ── Guard: entity detected → deterministic backend can handle ─────────────
@@ -142,7 +165,7 @@ function hasRelevantData(ragContext) {
   return ragContext.type !== 'empty' && ragContext.data.length > 0;
 }
 
-module.exports = {
+export {
   shouldUseAI,
   hasRelevantData,
   LONG_MESSAGE_WORDS,

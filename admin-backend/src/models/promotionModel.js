@@ -1,5 +1,5 @@
 // ── Promotion Model ──────────────────────────────────────────────────────────
-const db = require('../config/database');
+import db from '../config/database.js';
 
 const PromotionModel = {
   async findAllByBusiness(businessId) {
@@ -61,4 +61,4 @@ const PromotionModel = {
   },
 };
 
-module.exports = PromotionModel;
+export default PromotionModel;

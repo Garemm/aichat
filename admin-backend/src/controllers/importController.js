@@ -7,13 +7,13 @@
 //   POST /import/confirm  — with createMissingCategories:true → create cats + upsert
 //
 // Required columns: item_code, name, price (stock + category are validated too)
-const multer       = require('multer');
-const ExcelJS      = require('exceljs');
-const csv          = require('csv-parser');
-const { Readable } = require('stream');
-const db           = require('../config/database');
-const ProductModel  = require('../models/productModel');
-const CategoryModel = require('../models/categoryModel');
+import multer from 'multer';
+import ExcelJS from 'exceljs';
+import csv from 'csv-parser';
+import { Readable } from 'stream';
+import db from '../config/database.js';
+import ProductModel from '../models/productModel.js';
+import CategoryModel from '../models/categoryModel.js';
 
 // ── Multer — memory storage, 5 MB limit ──────────────────────────────────────
 const upload = multer({
@@ -318,8 +318,10 @@ const confirm = async (req, res, next) => {
     }
 
     // ── Collect unknown categories still present in the submitted rows ────────
+    // Only consider a row's category as "unknown" if the user has NOT already
+    // assigned a category_id via the preview dropdown.
     const unknownSet = new Set(
-      rows.map((r) => r.missingCategory).filter(Boolean)
+      rows.filter((r) => r.missingCategory && !r.category_id).map((r) => r.missingCategory)
     );
     const unknownCategories = [...unknownSet];
 
@@ -341,9 +343,9 @@ const confirm = async (req, res, next) => {
       const existingCats   = await CategoryModel.findByBusiness(req.businessId);
       const categoryIndex  = new Map(existingCats.map((c) => [c.name.toLowerCase(), c.id]));
 
-      // Patch category_id on rows that had a missing category
+      // Patch category_id on rows that had a missing category AND no user-selected id
       resolvedRows = rows.map((row) => {
-        if (row.missingCategory) {
+        if (row.missingCategory && !row.category_id) {
           const id = categoryIndex.get(row.missingCategory.toLowerCase());
           return {
             ...row,
@@ -354,10 +356,49 @@ const confirm = async (req, res, next) => {
             _status:   row._status === 'warning' && (row._errors || []).length === 0 ? 'valid' : row._status,
           };
         }
-        return row;
+        // Row already has category_id (user selected it); just clear the stale flag
+        return row.missingCategory ? { ...row, missingCategory: null } : row;
       });
 
       console.log(`[import] Created ${created.length} new categories:`, created.map((c) => c.name));
+    }
+
+    // ── Subscription product-limit check ─────────────────────────────────────
+    // Count how many rows in this batch are new inserts (item_code not yet in DB).
+    // Updates to existing products don't count against the limit.
+    const maxProducts = await ProductModel.getSubscriptionLimit(req.businessId);
+    if (maxProducts !== null) {
+      const validRows = resolvedRows.filter((r) => r._status !== 'error');
+      if (validRows.length > 0) {
+        const incomingCodes = validRows.map((r) => r.item_code);
+        const { rows: existingRows } = await db.query(
+          `SELECT item_code_empresa FROM products
+           WHERE business_id = $1 AND item_code_empresa = ANY($2::text[])`,
+          [req.businessId, incomingCodes]
+        );
+        const existingSet = new Set(existingRows.map((r) => r.item_code_empresa));
+        const newCount    = incomingCodes.filter((c) => !existingSet.has(c)).length;
+
+        if (newCount > 0) {
+          const currentCount = await ProductModel.countByBusiness(req.businessId);
+          const available    = maxProducts - currentCount;
+          if (available <= 0) {
+            return res.status(403).json({
+              success: false,
+              error: 'Has alcanzado el límite de productos permitido por tu plan actual. ' +
+                     'Puedes actualizar tu suscripción para continuar agregando más productos.',
+            });
+          }
+          if (newCount > available) {
+            return res.status(403).json({
+              success: false,
+              error: `Tu plan actual solo permite agregar ${available} producto(s) más. ` +
+                     `El archivo tiene ${newCount} productos nuevos. ` +
+                     'Actualiza tu suscripción para importar todos.',
+            });
+          }
+        }
+      }
     }
 
     // ── Execute batch upsert inside a single transaction ──────────────────────
@@ -389,4 +430,4 @@ const confirm = async (req, res, next) => {
   }
 };
 
-module.exports = { preview, confirm };
+export { preview, confirm };

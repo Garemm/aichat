@@ -1,5 +1,5 @@
 // ── Category Model ──────────────────────────────────────────────────────────
-const db = require('../config/database');
+import db from '../config/database.js';
 
 const CategoryModel = {
   async findByBusiness(businessId) {
@@ -66,9 +66,9 @@ const CategoryModel = {
         // Only insert if it doesn't already exist
         const { rows } = await client.query(
           `INSERT INTO categories (name, business_id)
-           SELECT $1, $2
+           SELECT $1::text, $2::int
            WHERE NOT EXISTS (
-             SELECT 1 FROM categories WHERE business_id = $2 AND lower(name) = lower($1)
+             SELECT 1 FROM categories WHERE business_id = $2::int AND lower(name) = lower($1::text)
            )
            RETURNING id, name`,
           [name, businessId]
@@ -86,4 +86,4 @@ const CategoryModel = {
   },
 };
 
-module.exports = CategoryModel;
+export default CategoryModel;
