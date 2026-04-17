@@ -788,6 +788,7 @@ function decide(intentResult, entityResult, context, normalizedText) {
     }
   }
 
+
   // Rule 4.6: "es [adjective]?" / "están [adjective]?" — yes/no description question
   // about the confirmed context product. "¿Es natural?", "¿Es picante?", "¿Es vegano?"
   // are attribute questions about the product just presented, NOT product-name searches.
@@ -806,6 +807,25 @@ function decide(intentResult, entityResult, context, normalizedText) {
       entity:      { type: context.lastEntity.type, value: context.lastEntity.value },
       usedContext: true,
       reason:      `yes/no adjective question about context product "${context.lastEntity.value}"`,
+    };
+  }
+
+  // Rule 4.7: "que contiene este articulo" o similares, con contexto de producto
+  // Se asegura que preguntas de descripción ambiguas usen el contexto si existe un producto
+  const DESC_ARTICULO_RE = /que\s+contiene\s+este\s+articulo|que\s+lleva\s+este\s+articulo|que\s+ingredientes|que\s+lleva|que\s+contiene/i;
+  if (
+    !hasEntity &&
+    DESC_ARTICULO_RE.test(normalizedText) &&
+    context.lastEntity?.type === 'product' &&
+    context.lastEntity?.value &&
+    context.lastEntityFound !== false
+  ) {
+    return {
+      strategy:    'context',
+      intent:      'descripcion',
+      entity:      { type: context.lastEntity.type, value: context.lastEntity.value },
+      usedContext: true,
+      reason:      `descripcion question about context product "${context.lastEntity.value}"`,
     };
   }
 
