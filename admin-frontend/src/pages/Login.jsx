@@ -32,9 +32,9 @@ const Login = () => {
     e.preventDefault();
     setError('');
     setLoading(true);
-    try {
+      try {
       await signIn(form.username, form.password);
-      navigate('/', { replace: true });
+      navigate('..', { replace: true });
     } catch (err) {
       setError(err.message);
     } finally {
@@ -129,7 +129,7 @@ const Login = () => {
 
         {/* Forgot password */}
         <div className="login-card__forgot">
-          <Link to="/forgot-password" className="register-link">¿Olvidaste tu contraseña?</Link>
+          <Link to="../forgot-password" className="register-link">¿Olvidaste tu contraseña?</Link>
         </div>
 
         {/* Submit */}
@@ -146,7 +146,7 @@ const Login = () => {
         {/* Register */}
         <p className="login-card__footer">
           ¿No tienes cuenta?{' '}
-          <Link to="/register" className="register-link">Crear cuenta</Link>
+          <Link to="../register" className="register-link">Crear cuenta</Link>
         </p>
       </form>
 

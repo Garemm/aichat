@@ -6,7 +6,7 @@ import logo from '../images/hayChat.png';
 import ALL_LINKS from '../routes/navLinks';
 
 const bottomLinks = [
-  { to: '/change-password', label: 'Cambiar contraseña', icon: 'lock' },
+  { to: 'change-password', label: 'Cambiar contraseña', icon: 'lock' },
 ];
 
 // Stagger container: each child animates in sequence

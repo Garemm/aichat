@@ -30,7 +30,7 @@ import MiHayChat    from './pages/MiHayChat';
 const SmartRedirect = () => {
   const { permissions } = useAuth();
   const firstAllowed = ALL_LINKS.find((l) => permissions[l.permKey] === true);
-  return <Navigate to={firstAllowed ? firstAllowed.to : '/change-password'} replace />;
+  return <Navigate to={firstAllowed ? firstAllowed.to : 'change-password'} replace />;
 };
 
 // Inner component so we can use useLocation inside BrowserRouter
@@ -40,10 +40,10 @@ const AnimatedRoutes = () => {
   return (
     <AnimatePresence mode="wait">
       <Routes location={location} key={location.pathname}>
-        <Route path="/login"           element={<Login />} />
-        <Route path="/register"        element={<Register />} />
-        <Route path="/forgot-password" element={<ForgotPassword />} />
-        <Route path="/reset-password"  element={<ResetPassword />} />
+        <Route path="login"           element={<Login />} />
+        <Route path="register"        element={<Register />} />
+        <Route path="forgot-password" element={<ForgotPassword />} />
+        <Route path="reset-password"  element={<ResetPassword />} />
 
         <Route
           path="/*"
@@ -77,7 +77,7 @@ const AnimatedRoutes = () => {
 const App = () => (
   <ToastProvider>
     <AuthProvider>
-      <BrowserRouter>
+      <BrowserRouter basename="/panelAdministrador">
         <AnimatedRoutes />
       </BrowserRouter>
     </AuthProvider>

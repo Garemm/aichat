@@ -27,7 +27,7 @@ const ResetPassword = () => {
     try {
       await resetPassword(token, form.password, form.confirmPassword);
       setSuccess(true);
-      setTimeout(() => navigate('/login', { replace: true }), 2500);
+      setTimeout(() => navigate('../login', { replace: true }), 2500);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -43,7 +43,7 @@ const ResetPassword = () => {
           <p style={{ textAlign: 'center', fontSize: '.875rem', color: 'var(--text-2)' }}>
             Este enlace de restablecimiento no es válido o ya fue utilizado.
           </p>
-          <Link to="/forgot-password" className="register-link" style={{ textAlign: 'center', display: 'block' }}>
+          <Link to="../forgot-password" className="register-link" style={{ textAlign: 'center', display: 'block' }}>
             Solicitar nuevo enlace
           </Link>
         </div>
@@ -99,7 +99,7 @@ const ResetPassword = () => {
             </button>
 
             <p className="login-card__footer">
-              <Link to="/login" className="register-link">Volver al inicio de sesión</Link>
+              <Link to="../login" className="register-link">Volver al inicio de sesión</Link>
             </p>
           </>
         )}

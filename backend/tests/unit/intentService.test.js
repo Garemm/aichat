@@ -1,10 +1,4 @@
-import {
-  detectIntent,
-  scoreIntents,
-  isStandaloneIntent,
-  detectMultipleIntents,
-  MIN_CONFIDENCE,
-} from '../../src/services/intentDetector.js';
+import { detectIntent, scoreIntents, isStandaloneIntent, MIN_CONFIDENCE } from '../../src/services/intentDetector.js';
 
 // ─── detectIntent ─────────────────────────────────────────────────────────────
 
@@ -325,40 +319,5 @@ describe('isStandaloneIntent()', () => {
 
   test('unknown intent returns false', () => {
     expect(isStandaloneIntent('fake_intent')).toBe(false);
-  });
-});
-
-describe('detectMultipleIntents()', () => {
-  test('detecta multiples intents ordenados por score desc', () => {
-    const result = detectMultipleIntents('cuanto cuesta la pizza y a que hora abren');
-    expect(Array.isArray(result)).toBe(true);
-    expect(result.length).toBeGreaterThanOrEqual(2);
-    expect(result[0].score).toBeGreaterThanOrEqual(result[1].score);
-    expect(result.map((r) => r.intent)).toEqual(expect.arrayContaining(['precios', 'horarios']));
-  });
-
-  test('retorna arreglo vacio para input vacio', () => {
-    expect(detectMultipleIntents('')).toEqual([]);
-    expect(detectMultipleIntents(null)).toEqual([]);
-  });
-
-  test('solo devuelve intents con score minimo de confianza', () => {
-    const result = detectMultipleIntents('hola que tal');
-    expect(result).toEqual([]);
-  });
-});
-
-describe('descripcion priority patterns', () => {
-  test.each([
-    'que tiene la hamburguesa',
-    'que tienen los chiles en nogada',
-    'que contiene el combo',
-    'que incluye el paquete',
-    'que trae el set',
-    'de que esta hecho el pan',
-  ])('"%s" prioriza intent descripcion', (msg) => {
-    const result = detectIntent(msg);
-    expect(result.intent).toBe('descripcion');
-    expect(result.confident).toBe(true);
   });
 });

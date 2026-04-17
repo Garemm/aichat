@@ -37,7 +37,7 @@ const ForgotPassword = () => {
               próximos minutos. Revisa también la carpeta de spam. 
               De lo contrario, por favor revisa que lo hayas escrito correctamente o contacta al soporte. Gracias.
             </p>
-            <Link to="/login" className="register-link" style={{ textAlign: 'center', display: 'block' }}>
+            <Link to="../login" className="register-link" style={{ textAlign: 'center', display: 'block' }}>
               Volver al inicio de sesión
             </Link>
           </>
@@ -66,7 +66,7 @@ const ForgotPassword = () => {
             </button>
 
             <p className="login-card__footer">
-              <Link to="/login" className="register-link">Volver al inicio de sesión</Link>
+              <Link to="../login" className="register-link">Volver al inicio de sesión</Link>
             </p>
           </>
         )}

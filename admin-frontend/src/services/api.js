@@ -2,7 +2,7 @@
 // Access token lives in module scope (memory only — never localStorage).
 // AuthContext owns the token lifecycle; it registers callbacks here.
 
-const BASE = '/admin';
+const BASE = '/panel'; //debe coincidir con el path del backend (app.js) y el proxy del frontend (vite.config.js)
 
 // ── Token store (module-level, no persistence) ────────────────────────────────
 let _accessToken = null;

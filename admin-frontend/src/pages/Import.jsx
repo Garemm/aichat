@@ -524,7 +524,7 @@ const Import = () => {
         <button className="btn btn--ghost" onClick={reset}>
           <Icon name="upload" size={15} /> Importar otro archivo
         </button>
-        <button className="btn btn--primary" onClick={() => navigate('/products')}>
+        <button className="btn btn--primary" onClick={() => navigate('../products')}>
           <Icon name="products" size={15} /> Ir a Productos
         </button>
       </div>

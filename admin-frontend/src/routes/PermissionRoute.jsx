@@ -17,7 +17,7 @@ const PermissionRoute = ({ permKey, children }) => {
 
   // Find the first accessible route from the shared nav list
   const firstAllowed = ALL_LINKS.find((l) => permissions[l.permKey] === true);
-  return <Navigate to={firstAllowed ? firstAllowed.to : '/change-password'} replace />;
+  return <Navigate to={firstAllowed ? firstAllowed.to : 'change-password'} replace />;
 };
 
 export default PermissionRoute;

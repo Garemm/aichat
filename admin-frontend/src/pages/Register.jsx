@@ -92,7 +92,7 @@ const Register = () => {
     try {
       await register(form);
       setSuccess(true);
-      setTimeout(() => navigate('/login'), 2500);
+      setTimeout(() => navigate('../login'), 2500);
     } catch (err) {
       setServerErr(err.message);
     } finally {
@@ -307,7 +307,7 @@ const Register = () => {
 
         <p className="register-card__footer">
           ¿Ya tienes cuenta?{' '}
-          <Link to="/login" className="register-link">Iniciar sesión</Link>
+          <Link to="../login" className="register-link">Iniciar sesión</Link>
         </p>
       </form>
 

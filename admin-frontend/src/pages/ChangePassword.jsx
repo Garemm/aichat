@@ -30,7 +30,7 @@ const ChangePassword = () => {
     try {
       await changePassword(form.currentPassword, form.newPassword, form.confirmPassword);
       addToast('Contraseña actualizada correctamente', 'success');
-      navigate('/dashboard', { replace: true });
+      navigate('../dashboard', { replace: true });
     } catch (err) {
       setError(err.message);
     } finally {
